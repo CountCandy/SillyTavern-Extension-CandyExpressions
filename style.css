@@ -507,6 +507,10 @@
     font-size: 0.9em;
 }
 
+.candy-log-entry > summary.candy-log-nosprite {
+    color: var(--candy-action);
+}
+
 .candy-log-heading {
     margin-top: 8px;
     font-size: 0.76em;

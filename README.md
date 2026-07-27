@@ -69,11 +69,23 @@ Emotions and actions share one library (used for every character). Which of them
 
 ### Thinking / reasoning models
 
-Built for reasoning-capable classifiers (e.g. Gemma-class models). The classifier prompt invites the model to reason inside `<think>…</think>`, and that block is stripped before the label is parsed. If your model uses different delimiters, change **Think open / Think close** in the settings. As a safety net the parser also:
+The classifier is told to **reason first, then answer** — which measurably improves consistency, especially for action labels. It ends its reply with:
 
-* understands JSON answers like `{"label":"joy"}`,
-* scans from the **end** of the output (so leftover reasoning that mentions other labels doesn't fool it),
-* falls back to fuzzy/substring matching, then to your fallback label.
+```
+ANSWER: excitement
+```
+
+That marker is what gets parsed, so **the reasoning format doesn't matter**. Whether your model emits `<think>…</think>`, `<|channel|>analysis`, `<|channel>thought`, or nothing at all, the answer is still read correctly. Stripped automatically: `<think>`, `<thinking>`, `<reasoning>`, `<reflection>`, `<scratchpad>`, and channel/harmony control tags. The **Think open / close** boxes are only needed for genuinely unusual formats.
+
+Fallbacks, in order: `ANSWER:` line → JSON (`{"label":"joy"}`) → last matching word in the reply → substring match → your fallback label. Scanning from the *end* means reasoning that mentions other labels along the way doesn't fool it.
+
+### Consistency
+
+**Deterministic classification** (on by default) forces greedy sampling — temperature 0, top_k 1, no stop strings — *for classification requests only*. Your roleplay preset is untouched.
+
+This matters a lot: without it, classification inherits your RP preset's temperature and top_p, so the *same message can classify differently every time*. Roleplay stop-strings can also truncate the reply before the answer line, which is why they're cleared too.
+
+**Reply token budget** (default 256) gives reasoning room to finish. If replies look cut off mid-thought, raise it.
 
 ---
 
@@ -149,8 +161,12 @@ In the **Expression Library** section:
 | Borrow a missing sprite from the default variant | If a variant lacks a sprite for the chosen label, fall back to the `default` variant. |
 | Show an emoji when no sprite is found | Last-resort emoji instead of a blank window. |
 | Classifier prompt | The system prompt. Macros: `{{labels}}`, `{{descriptions}}`, `{{fallback}}`, `{{thinking}}`. |
-| Classifier may &lt;think&gt; | Allow reasoning and strip it. Configure the delimiters. |
+| Make the classifier reason first | Ask for short reasoning before the `ANSWER:` line. Recommended. |
+| Deterministic classification | Force temperature 0 / top_k 1 for classification only, so results are repeatable. |
+| Warn when a label has no sprite | Toast when a classified label has no image, instead of failing silently. |
+| Reply token budget | Room for reasoning + the answer line (default 256). |
 | Fallback label | Used when nothing else matches. |
+| Test classifier | Classify the last message now and report the label **and** whether a sprite was found. |
 | View classification log | The exact prompt/reply audit trail (last 25 classifications). |
 | Log to browser console | Mirror every classification into the F12 console as it happens. |
 
@@ -165,6 +181,18 @@ In the **Expression Library** section:
 | `/candy-classify [text]` | Classify `text` (or the last character message) and set the sprite. Returns the label. |
 | `/candy-log` | Open the classification log (exact prompt sent + raw reply). |
 | `/candy-refresh` | Reload sprites and re-classify the last message. |
+
+---
+
+## Troubleshooting
+
+**A label is chosen but no sprite appears.** That's the most common cause of "nothing happens": the classification worked, but that variant has no image for the chosen label. The log marks these entries **NO SPRITE**, and you get a toast (once per label per variant). Fix it by uploading `<label>.png` to that variant, turning on *Borrow a missing sprite from the default variant*, or enabling the emoji fallback. **Test classifier** tells you which of the two happened in one click.
+
+**The same message keeps giving different answers.** Turn on *Deterministic classification*. Your roleplay preset's temperature is otherwise randomising the result.
+
+**Answers look truncated or the label is missing.** Raise the *Reply token budget*; reasoning models can spend a lot of it thinking.
+
+**Nothing classifies at all.** Check *Enable automatic classification* is ticked, then hit **Test classifier** — it reports the exact failure.
 
 ---
 

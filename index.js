@@ -51,7 +51,24 @@ const DEFAULT_ACTIONS = [
     { label: 'jumping', description: 'Leaping or already airborne after a jump.' },
 ];
 
-const DEFAULT_CLASSIFY_PROMPT = `You are an expression classifier for a visual-novel engine. You will be shown the most recent line said or narrated for a single character. Pick the ONE label from the list that best matches that character's current facial expression, emotion, or physical action.
+const ANSWER_MARKER = 'ANSWER:';
+
+const DEFAULT_CLASSIFY_PROMPT = `You are an expression classifier for a visual-novel engine. You will be shown the most recent line said or narrated for a single character. Decide which ONE label best describes that character's current facial expression, emotion, or physical action.
+
+Available labels:
+{{labels}}
+{{descriptions}}
+Rules:
+- Judge only the named character's state - never the user's.
+- Pick an action label only if the text clearly shows that physical action happening right now; otherwise pick the closest emotion.
+- Prefer the strongest emotion actually shown in the text over a neutral reading.
+- If genuinely nothing fits, choose "{{fallback}}".
+{{thinking}}
+End your reply with the final answer on its own last line, exactly like this:
+${ANSWER_MARKER} <label>`;
+
+/** The v1 default; replaced automatically on upgrade if the user never edited it. */
+const LEGACY_CLASSIFY_PROMPT_V1 = `You are an expression classifier for a visual-novel engine. You will be shown the most recent line said or narrated for a single character. Pick the ONE label from the list that best matches that character's current facial expression, emotion, or physical action.
 
 Available labels:
 {{labels}}
@@ -63,6 +80,14 @@ Rules:
 - Output the label in lowercase, with no quotes, punctuation, or extra words.
 {{thinking}}`;
 
+/** Reasoning instructions injected by the {{thinking}} macro when thinking is enabled. */
+const THINKING_INSTRUCTIONS = `
+Before answering, reason briefly and explicitly:
+1. What is the character physically doing in this line?
+2. What are they feeling, and how strongly?
+3. Which single label from the list fits best, and why is it better than the runner-up?
+Keep the reasoning short - a few sentences at most.`;
+
 // Optional emoji fallback for the default emotions (used only if enabled and no sprite exists).
 const EMOJI_FALLBACK = {
     admiration: '😍', amusement: '😄', anger: '😡', annoyance: '😒', approval: '👍',
@@ -73,8 +98,10 @@ const EMOJI_FALLBACK = {
     surprise: '😲', neutral: '😐',
 };
 
+const SETTINGS_VERSION = 2;
+
 const DEFAULT_SETTINGS = {
-    version: 1,
+    version: SETTINGS_VERSION,
     enabled: true,
     // classifier
     classifyPrompt: DEFAULT_CLASSIFY_PROMPT,
@@ -84,6 +111,9 @@ const DEFAULT_SETTINGS = {
     thinkSuffix: '</think>',
     maxSampleChars: 1400,        // trim very long messages before classifying
     debugLogging: false,         // also mirror each classification to the browser console
+    deterministic: true,         // force greedy sampling so the same message classifies the same way
+    warnMissingSprite: true,     // tell the user when a classified label has no sprite
+    maxResponseTokens: 256,      // room for reasoning + the ANSWER line
     // sprites / display
     defaultVariant: DEFAULT_VARIANT,
     fallbackExpression: 'neutral',
@@ -141,6 +171,16 @@ function migrateSettings() {
     if (!Array.isArray(s.emotions)) s.emotions = structuredClone(DEFAULT_EMOTIONS);
     if (!Array.isArray(s.actions)) s.actions = structuredClone(DEFAULT_ACTIONS);
     if (!s.characters || typeof s.characters !== 'object') s.characters = {};
+
+    // v1 -> v2: the classifier prompt now asks for reasoning and an "ANSWER:" line.
+    // Only replace it if the user never customised it.
+    if ((s.version ?? 1) < 2) {
+        if (!s.classifyPrompt || s.classifyPrompt.trim() === LEGACY_CLASSIFY_PROMPT_V1.trim()) {
+            s.classifyPrompt = DEFAULT_CLASSIFY_PROMPT;
+        }
+        s.version = 2;
+    }
+
     saveSettings();
 }
 
@@ -365,9 +405,7 @@ function buildClassifyPrompt(labels) {
         ? '\nLabel guide (use to disambiguate, especially actions):\n' +
           described.map(e => `- ${e.label}: ${e.description.trim()}`).join('\n') + '\n'
         : '';
-    const thinking = s.thinkingEnabled
-        ? `\nYou may reason privately first. Put any reasoning between ${s.thinkPrefix} and ${s.thinkSuffix}. After ${s.thinkSuffix}, output only the final label.`
-        : '';
+    const thinking = s.thinkingEnabled ? THINKING_INSTRUCTIONS : '\nAnswer immediately, without explanation.';
     return String(s.classifyPrompt)
         .replace(/{{labels}}/g, labels.join(', '))
         .replace(/{{descriptions}}/g, descBlock)
@@ -375,22 +413,51 @@ function buildClassifyPrompt(labels) {
         .replace(/{{fallback}}/g, s.fallbackExpression || 'neutral');
 }
 
-/** Remove <think>...</think> style blocks using the configured delimiters. */
+/** Reasoning wrappers emitted by common local models, stripped regardless of settings. */
+const REASONING_BLOCK_PATTERNS = [
+    /<think>[\s\S]*?<\/think>/gi,
+    /<thinking>[\s\S]*?<\/thinking>/gi,
+    /<reason(?:ing)?>[\s\S]*?<\/reason(?:ing)?>/gi,
+    /<reflection>[\s\S]*?<\/reflection>/gi,
+    /<scratchpad>[\s\S]*?<\/scratchpad>/gi,
+    /<\|?begin_of_thought\|?>[\s\S]*?<\|?end_of_thought\|?>/gi,
+];
+
+/**
+ * Control tags used by "channel"/harmony style models, e.g.
+ *   <|channel|>analysis   <|channel>thought   <channel|>final   <|start|>   <|end|>
+ * These are markup, not content, so they are always removed.
+ */
+const CHANNEL_TAG_PATTERN = /<\|[^<>|]*\|?>|<[^<>|]*\|>/g;
+
+/** Strip reasoning so only the model's actual answer text remains. */
 function stripThinking(text) {
     const s = settings();
     let out = String(text || '');
+
+    // 1. User-configured delimiters (if they set a custom pair).
     if (s.thinkPrefix && s.thinkSuffix) {
         const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         try {
-            const re = new RegExp(`${esc(s.thinkPrefix)}[\\s\\S]*?${esc(s.thinkSuffix)}`, 'g');
-            out = out.replace(re, ' ');
+            out = out.replace(new RegExp(`${esc(s.thinkPrefix)}[\\s\\S]*?${esc(s.thinkSuffix)}`, 'g'), ' ');
+            // Unterminated block (model never closed the tag): drop everything before the opener.
+            const lastOpen = out.lastIndexOf(s.thinkPrefix);
+            if (lastOpen >= 0 && !out.includes(s.thinkSuffix)) out = out.slice(lastOpen + s.thinkPrefix.length);
         } catch { /* ignore bad regex */ }
     }
-    // As a fallback, also lean on SillyTavern's own reasoning parser if present.
+
+    // 2. Well-known reasoning wrappers.
+    for (const re of REASONING_BLOCK_PATTERNS) out = out.replace(re, ' ');
+
+    // 3. Channel/harmony control tags.
+    out = out.replace(CHANNEL_TAG_PATTERN, ' ');
+
+    // 4. SillyTavern's own reasoning parser, if the user configured a template.
     try {
         const parsed = getContext().parseReasoningFromString?.(out, { strict: false });
         if (parsed && parsed.content) out = parsed.content;
     } catch { /* ignore */ }
+
     return out;
 }
 
@@ -399,6 +466,21 @@ const normalizeLabel = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g
 /** Turn a raw model completion into one of our labels. Robust against reasoning noise. */
 function parseLabel(raw, labels, fallback) {
     let text = stripThinking(raw);
+    const matchLabel = (candidate) => labels.find(l => normalizeLabel(l) === normalizeLabel(candidate));
+
+    // 0. The explicit answer marker wins: "ANSWER: joy" (last occurrence).
+    //    This is what makes the parser immune to whatever reasoning format the model uses.
+    const answerMatches = [...text.matchAll(/ANSWER\s*[:\-=]\s*(.+)/gi)];
+    if (answerMatches.length) {
+        const tail = answerMatches[answerMatches.length - 1][1];
+        const direct = matchLabel(tail.trim().replace(/[."'`*]/g, ''));
+        if (direct) return direct;
+        // The line may carry extra words - take the first token that is a known label.
+        for (const token of (tail.toLowerCase().match(/[a-z0-9_]+/g) || [])) {
+            const hit = matchLabel(token);
+            if (hit) return hit;
+        }
+    }
 
     // 1. Try structured JSON output: {"label": "..."} / {"emotion": "..."} / {"expression": "..."}
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -454,7 +536,11 @@ async function classifyText(text, { render = true } = {}) {
     let raw = '';
     try {
         // Main chat API, but with OUR system prompt only (no roleplay prompt, no chat history).
-        raw = await getContext().generateRaw({ prompt: sampled, systemPrompt });
+        raw = await withDeterministicSampling(() => getContext().generateRaw({
+            prompt: sampled,
+            systemPrompt,
+            responseLength: s.maxResponseTokens || 256,
+        }));
     } catch (err) {
         console.error(`[${MODULE_NAME}] Classification request failed`, err);
         recordClassification({
@@ -469,13 +555,78 @@ async function classifyText(text, { render = true } = {}) {
     }
 
     const label = parseLabel(raw, labels, s.fallbackExpression);
+    state.lastEmotion = label;
+
+    // Resolve the sprite so we can report *why* nothing appeared, if nothing does.
+    const file = await resolveSprite(character.name, variant, label);
     recordClassification({
         character: character.name, variant, labels, systemPrompt,
         sentText: sampled, raw, label, ms: Date.now() - started, error: null,
+        sprite: file ? file.fileName : null,
     });
-    state.lastEmotion = label;
+
     if (render) await renderSprite(character.name, variant, label);
+    if (!file) warnMissingSprite(character.name, variant, label);
     return label;
+}
+
+/** Warn once per variant+label so a missing sprite is visible instead of silent. */
+const warnedMissing = new Set();
+function warnMissingSprite(charName, variant, label) {
+    if (!settings().warnMissingSprite) return;
+    const key = `${charName}/${variant}/${label}`;
+    if (warnedMissing.has(key)) return;
+    warnedMissing.add(key);
+    console.warn(`[${MODULE_NAME}] Classified "${label}" but no sprite exists in "${variant}" (and no fallback matched).`);
+    if (typeof toastr !== 'undefined') {
+        toastr.warning(
+            `Classified as "${label}", but there is no sprite for it in variant "${variant}".`,
+            'Candy Expressions: no sprite',
+            { timeOut: 6000 },
+        );
+    }
+}
+
+// --- deterministic sampling -------------------------------------------- //
+// Classification should be repeatable. Without this, the roleplay preset's
+// temperature/top_p make the same message classify differently each time.
+let classifyCallDepth = 0;
+
+function samplerOverrideHook(args) {
+    if (classifyCallDepth <= 0 || !settings().deterministic || !args || typeof args !== 'object') return;
+    Object.assign(args, {
+        temperature: 0,
+        top_p: 1,
+        top_k: 1,
+        min_p: 0,
+        typical_p: 1,
+        repetition_penalty: 1,
+        frequency_penalty: 0,
+        presence_penalty: 0,
+        // Roleplay presets often carry stop strings that would truncate our answer.
+        stop: [],
+        stopping_strings: [],
+        custom_token_bans: [],
+    });
+}
+
+/** Run fn with greedy sampling forced for the duration of the request. */
+async function withDeterministicSampling(fn) {
+    const c = getContext();
+    const es = c.eventSource;
+    const et = c.eventTypes;
+    if (!es || !et || !settings().deterministic) return fn();
+
+    classifyCallDepth++;
+    es.on(et.TEXT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+    es.on(et.CHAT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+    try {
+        return await fn();
+    } finally {
+        classifyCallDepth--;
+        es.removeListener?.(et.TEXT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+        es.removeListener?.(et.CHAT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+    }
 }
 
 const CLASSIFY_LOG_MAX = 25;
@@ -499,6 +650,39 @@ function recordClassification(entry) {
         if (entry.error) console.warn('error:', entry.error);
         console.groupEnd();
     }
+}
+
+/** Run one classification on demand and report what happened, end to end. */
+async function testClassifier() {
+    const character = getActiveCharacter();
+    if (!character) { toastr?.warning('Open a character chat first.', 'Candy Expressions'); return; }
+    const last = getLastCharacterMessage();
+    if (!last?.mes) { toastr?.warning('No character message to classify yet.', 'Candy Expressions'); return; }
+
+    const waiting = toastr?.info('Classifying…', 'Candy Expressions', { timeOut: 0, extendedTimeOut: 0 });
+    let label = null;
+    try {
+        label = await classifyText(last.mes);
+    } finally {
+        toastr?.clear(waiting);
+    }
+
+    const entry = state.classifyLog[0];
+    const variant = getCurrentVariant();
+    const lines = [
+        `<b>Result:</b> ${label ? escapeHtml(label) : '<i>failed</i>'}`,
+        `<b>Variant:</b> ${escapeHtml(variant)}`,
+        `<b>Sprite shown:</b> ${entry?.sprite ? `<tt>${escapeHtml(entry.sprite)}</tt>` : '<span style="color:#e08a4b">none — no file for this label in this variant</span>'}`,
+        `<b>Labels offered:</b> ${entry?.labels?.length ?? 0}`,
+        `<b>Took:</b> ${entry?.ms ?? '?'}ms`,
+    ];
+    if (entry?.error) lines.push(`<b>Error:</b> ${escapeHtml(entry.error)}`);
+    if (!entry?.sprite && label) {
+        lines.push('', `<span class="candy-hint">Upload a sprite named <tt>${escapeHtml(label)}.png</tt> to the "${escapeHtml(variant)}" variant, or enable the emoji fallback, and it will show up.</span>`);
+    }
+    lines.push('', '<span class="candy-hint">Open "View classification log" to see the exact prompt and raw reply.</span>');
+
+    await getContext().Popup.show.text('Classifier test', lines.join('<br>'));
 }
 
 /**
@@ -528,7 +712,9 @@ async function showClassificationLog() {
         det.className = 'candy-log-entry';
         const sum = document.createElement('summary');
         const when = e.time.replace('T', ' ').replace(/\..*/, '');
-        sum.textContent = `${when} — ${e.character} / ${e.variant} → ${e.label ?? 'FAILED'} (${e.ms}ms)`;
+        const spriteNote = e.label ? (e.sprite ? ` · ${e.sprite}` : ' · NO SPRITE') : '';
+        sum.textContent = `${when} — ${e.character} / ${e.variant} → ${e.label ?? 'FAILED'}${spriteNote} (${e.ms}ms)`;
+        if (e.label && !e.sprite) sum.classList.add('candy-log-nosprite');
         det.append(sum);
 
         const addBlock = (heading, body) => {
@@ -540,6 +726,7 @@ async function showClassificationLog() {
             pre.textContent = body || '(empty)';
             det.append(h, pre);
         };
+        addBlock('Result', `label: ${e.label ?? '(none)'}\nsprite shown: ${e.sprite ?? 'NONE — no file for this label in this variant'}`);
         addBlock(`Labels offered (${e.labels.length})`, e.labels.join(', '));
         addBlock('SYSTEM PROMPT — the only instructions sent', e.systemPrompt);
         addBlock('USER MESSAGE — the only content sent', e.sentText);
@@ -665,14 +852,15 @@ async function resolveSprite(charName, variant, label) {
     return file;
 }
 
+/** @returns {Promise<object|null>} the sprite file that was displayed, if any */
 async function renderSprite(charName, variant, label) {
-    if (!settings().showSpriteWindow) return;
+    if (!settings().showSpriteWindow) return null;
     ensureHolder();
     updateHolderVariantSelect();
 
     const img = document.getElementById('candy-expression-image');
     const emoji = document.querySelector('#candy-expression-holder .candy-emoji-fallback');
-    if (!img) return;
+    if (!img) return null;
 
     const file = await resolveSprite(charName, variant, label);
     if (file) {
@@ -689,6 +877,7 @@ async function renderSprite(charName, variant, label) {
         img.style.display = 'none';
         if (emoji) emoji.style.display = 'none';
     }
+    return file;
 }
 
 function clearSprite() {
@@ -854,15 +1043,23 @@ const SETTINGS_HTML = `
                 <div class="candy-row">
                     <div class="menu_button" id="candy-prompt-reset"><i class="fa-solid fa-clock-rotate-left"></i> Reset to default</div>
                 </div>
-                <label class="checkbox_label" for="candy-thinking"><input type="checkbox" id="candy-thinking"><span>Classifier may &lt;think&gt; first (reasoning is stripped before parsing)</span></label>
+                <label class="checkbox_label" for="candy-thinking"><input type="checkbox" id="candy-thinking"><span>Make the classifier reason before answering (recommended - more consistent)</span></label>
+                <label class="checkbox_label" for="candy-deterministic" title="Forces temperature 0 / top_k 1 for classification only. Without this, your roleplay preset's randomness makes the same message classify differently each time."><input type="checkbox" id="candy-deterministic"><span>Deterministic classification (ignore roleplay randomness)</span></label>
+                <label class="checkbox_label" for="candy-warn-missing"><input type="checkbox" id="candy-warn-missing"><span>Warn me when a chosen label has no sprite</span></label>
                 <div class="candy-row nowrap">
-                    <label class="candy-grow">Think open<br><input id="candy-think-prefix" class="text_pole" type="text"></label>
-                    <label class="candy-grow">Think close<br><input id="candy-think-suffix" class="text_pole" type="text"></label>
+                    <label class="candy-grow">Reply token budget<br><input id="candy-max-tokens" class="text_pole" type="number" min="16" max="2048" step="16"></label>
                 </div>
+                <small>Reasoning models need room for their thinking plus the final <tt>ANSWER:</tt> line. Raise this if replies look cut off.</small>
+                <div class="candy-row nowrap">
+                    <label class="candy-grow">Think open (optional)<br><input id="candy-think-prefix" class="text_pole" type="text" placeholder="&lt;think&gt;"></label>
+                    <label class="candy-grow">Think close (optional)<br><input id="candy-think-suffix" class="text_pole" type="text" placeholder="&lt;/think&gt;"></label>
+                </div>
+                <small>Only needed for unusual formats. <tt>&lt;think&gt;</tt>, <tt>&lt;thinking&gt;</tt>, <tt>&lt;reasoning&gt;</tt> and channel-style tags like <tt>&lt;|channel|&gt;</tt> are stripped automatically.</small>
                 <div class="candy-row nowrap">
                     <label class="candy-grow">Fallback label<br><select id="candy-fallback" class="text_pole"></select></label>
                 </div>
                 <div class="candy-row">
+                    <span class="menu_button candy-primary" id="candy-test" title="Classify the last character message right now and show the result"><i class="fa-solid fa-vial"></i> Test classifier</span>
                     <span class="menu_button" id="candy-view-log" title="See the exact prompt and reply for recent classifications"><i class="fa-solid fa-magnifying-glass"></i> View classification log</span>
                 </div>
                 <label class="checkbox_label" for="candy-debug"><input type="checkbox" id="candy-debug"><span>Also log every classification to the browser console (F12)</span></label>
@@ -955,6 +1152,21 @@ function wireSettingsPanel() {
         thinkBox.checked = !!s.thinkingEnabled;
         thinkBox.addEventListener('change', (e) => { settings().thinkingEnabled = e.target.checked; saveSettings(); });
     }
+    bindCheckbox('candy-deterministic', 'deterministic');
+    bindCheckbox('candy-warn-missing', 'warnMissingSprite');
+
+    const maxTok = $id('candy-max-tokens');
+    if (maxTok) {
+        maxTok.value = s.maxResponseTokens ?? 256;
+        maxTok.addEventListener('change', () => {
+            const v = parseInt(maxTok.value, 10);
+            settings().maxResponseTokens = Number.isFinite(v) ? Math.min(2048, Math.max(16, v)) : 256;
+            maxTok.value = settings().maxResponseTokens;
+            saveSettings();
+        });
+    }
+
+    $id('candy-test')?.addEventListener('click', testClassifier);
     bindText('candy-think-prefix', 'thinkPrefix');
     bindText('candy-think-suffix', 'thinkSuffix');
 
