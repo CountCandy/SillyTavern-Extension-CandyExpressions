@@ -98,7 +98,18 @@ const EMOJI_FALLBACK = {
     surprise: '😲', neutral: '😐',
 };
 
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
+
+/**
+ * Sampler presets for classification. Classification wants consistency, not
+ * creativity - but the ideal temperature is model-dependent, so these are a
+ * starting point rather than a rule.
+ */
+const SAMPLER_PRESETS = {
+    greedy: { label: 'Greedy', temperature: 0, top_p: 1, top_k: 1, min_p: 0, repetition_penalty: 1 },
+    precise: { label: 'Precise', temperature: 0.2, top_p: 0.9, top_k: 40, min_p: 0.05, repetition_penalty: 1 },
+    balanced: { label: 'Balanced', temperature: 0.5, top_p: 0.9, top_k: 40, min_p: 0.05, repetition_penalty: 1.02 },
+};
 
 const DEFAULT_SETTINGS = {
     version: SETTINGS_VERSION,
@@ -111,9 +122,22 @@ const DEFAULT_SETTINGS = {
     thinkSuffix: '</think>',
     maxSampleChars: 1400,        // trim very long messages before classifying
     debugLogging: false,         // also mirror each classification to the browser console
-    deterministic: true,         // force greedy sampling so the same message classifies the same way
     warnMissingSprite: true,     // tell the user when a classified label has no sprite
     maxResponseTokens: 256,      // room for reasoning + the ANSWER line
+    // Samplers used for classification requests only - your roleplay preset is untouched.
+    sampler: {
+        enabled: true,
+        temperature: 0.2,
+        top_p: 0.9,
+        top_k: 40,
+        min_p: 0.05,
+        repetition_penalty: 1,
+        clearStopStrings: true,   // roleplay stop strings can cut off the ANSWER line
+        neutralizeOthers: true,   // switch off DynaTemp/XTC/DRY/smoothing, which fight the temperature
+    },
+    // Triggering: only ever runs on AI messages, never when you send one.
+    triggerOnSwipe: true,
+    triggerOnEdit: true,
     // sprites / display
     defaultVariant: DEFAULT_VARIANT,
     fallbackExpression: 'neutral',
@@ -179,6 +203,19 @@ function migrateSettings() {
             s.classifyPrompt = DEFAULT_CLASSIFY_PROMPT;
         }
         s.version = 2;
+    }
+
+    // v2 -> v3: the deterministic on/off switch became a full sampler block.
+    if ((s.version ?? 2) < 3) {
+        if (s.deterministic === false && s.sampler) s.sampler.enabled = false;
+        delete s.deterministic;
+        s.version = 3;
+    }
+
+    // Fill in any sampler keys added after the user's settings were written.
+    if (!s.sampler || typeof s.sampler !== 'object') s.sampler = structuredClone(DEFAULT_SETTINGS.sampler);
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS.sampler)) {
+        if (s.sampler[key] === undefined) s.sampler[key] = value;
     }
 
     saveSettings();
@@ -536,7 +573,7 @@ async function classifyText(text, { render = true } = {}) {
     let raw = '';
     try {
         // Main chat API, but with OUR system prompt only (no roleplay prompt, no chat history).
-        raw = await withDeterministicSampling(() => getContext().generateRaw({
+        raw = await withClassificationSamplers(() => getContext().generateRaw({
             prompt: sampled,
             systemPrompt,
             responseLength: s.maxResponseTokens || 256,
@@ -587,45 +624,81 @@ function warnMissingSprite(charName, variant, label) {
     }
 }
 
-// --- deterministic sampling -------------------------------------------- //
-// Classification should be repeatable. Without this, the roleplay preset's
-// temperature/top_p make the same message classify differently each time.
+// --- classification samplers ------------------------------------------- //
+// Classification wants consistency, so it gets its own sampler settings.
+// These apply ONLY while a classification request is in flight; the roleplay
+// preset is never modified.
 let classifyCallDepth = 0;
 
-function samplerOverrideHook(args) {
-    if (classifyCallDepth <= 0 || !settings().deterministic || !args || typeof args !== 'object') return;
-    Object.assign(args, {
-        temperature: 0,
-        top_p: 1,
-        top_k: 1,
-        min_p: 0,
-        typical_p: 1,
-        repetition_penalty: 1,
-        frequency_penalty: 0,
-        presence_penalty: 0,
-        // Roleplay presets often carry stop strings that would truncate our answer.
-        stop: [],
-        stopping_strings: [],
-        custom_token_bans: [],
-    });
+const isNum = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+const setIfNum = (obj, key, v) => { if (isNum(v)) obj[key] = Number(v); };
+
+function samplerActive() {
+    return classifyCallDepth > 0 && settings().sampler?.enabled;
 }
 
-/** Run fn with greedy sampling forced for the duration of the request. */
-async function withDeterministicSampling(fn) {
+/** Text-completion backends (llama.cpp, KoboldCpp, ooba, TabbyAPI...). */
+function textSamplerHook(args) {
+    if (!samplerActive() || !args || typeof args !== 'object') return;
+    const sp = settings().sampler;
+    setIfNum(args, 'temperature', sp.temperature);
+    setIfNum(args, 'top_p', sp.top_p);
+    setIfNum(args, 'top_k', sp.top_k);
+    setIfNum(args, 'min_p', sp.min_p);
+    setIfNum(args, 'repetition_penalty', sp.repetition_penalty);
+
+    if (sp.neutralizeOthers) {
+        // These would otherwise override or fight the temperature above.
+        Object.assign(args, {
+            dynamic_temperature: false,
+            dynatemp_low: undefined,
+            dynatemp_high: undefined,
+            dynatemp_range: undefined,
+            dynatemp_exponent: undefined,
+            smoothing_factor: 0,
+            dry_multiplier: 0,
+            xtc_probability: 0,
+            nsigma: 0,
+            typical_p: 1,
+            typical: 1,
+            tfs: 1,
+            top_a: 0,
+        });
+    }
+
+    if (sp.clearStopStrings) {
+        Object.assign(args, { stop: [], stopping_strings: [], custom_token_bans: [], banned_tokens: '' });
+    }
+}
+
+/** Chat-completion backends accept a much smaller set of knobs. */
+function chatSamplerHook(args) {
+    if (!samplerActive() || !args || typeof args !== 'object') return;
+    const sp = settings().sampler;
+    setIfNum(args, 'temperature', sp.temperature);
+    setIfNum(args, 'top_p', sp.top_p);
+    if (isNum(sp.top_k) && Number(sp.top_k) > 0) args.top_k = Number(sp.top_k);
+    args.frequency_penalty = 0;
+    args.presence_penalty = 0;
+    if (sp.clearStopStrings) args.stop = [];
+}
+
+/** Run fn with the classification samplers applied for the duration of the request. */
+async function withClassificationSamplers(fn) {
     const c = getContext();
     const es = c.eventSource;
     const et = c.eventTypes;
-    if (!es || !et || !settings().deterministic) return fn();
+    if (!es || !et || !settings().sampler?.enabled) return fn();
 
     classifyCallDepth++;
-    es.on(et.TEXT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
-    es.on(et.CHAT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+    es.on(et.TEXT_COMPLETION_SETTINGS_READY, textSamplerHook);
+    es.on(et.CHAT_COMPLETION_SETTINGS_READY, chatSamplerHook);
     try {
         return await fn();
     } finally {
         classifyCallDepth--;
-        es.removeListener?.(et.TEXT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
-        es.removeListener?.(et.CHAT_COMPLETION_SETTINGS_READY, samplerOverrideHook);
+        es.removeListener?.(et.TEXT_COMPLETION_SETTINGS_READY, textSamplerHook);
+        es.removeListener?.(et.CHAT_COMPLETION_SETTINGS_READY, chatSamplerHook);
     }
 }
 
@@ -1044,7 +1117,6 @@ const SETTINGS_HTML = `
                     <div class="menu_button" id="candy-prompt-reset"><i class="fa-solid fa-clock-rotate-left"></i> Reset to default</div>
                 </div>
                 <label class="checkbox_label" for="candy-thinking"><input type="checkbox" id="candy-thinking"><span>Make the classifier reason before answering (recommended - more consistent)</span></label>
-                <label class="checkbox_label" for="candy-deterministic" title="Forces temperature 0 / top_k 1 for classification only. Without this, your roleplay preset's randomness makes the same message classify differently each time."><input type="checkbox" id="candy-deterministic"><span>Deterministic classification (ignore roleplay randomness)</span></label>
                 <label class="checkbox_label" for="candy-warn-missing"><input type="checkbox" id="candy-warn-missing"><span>Warn me when a chosen label has no sprite</span></label>
                 <div class="candy-row nowrap">
                     <label class="candy-grow">Reply token budget<br><input id="candy-max-tokens" class="text_pole" type="number" min="16" max="2048" step="16"></label>
@@ -1063,6 +1135,40 @@ const SETTINGS_HTML = `
                     <span class="menu_button" id="candy-view-log" title="See the exact prompt and reply for recent classifications"><i class="fa-solid fa-magnifying-glass"></i> View classification log</span>
                 </div>
                 <label class="checkbox_label" for="candy-debug"><input type="checkbox" id="candy-debug"><span>Also log every classification to the browser console (F12)</span></label>
+            </div>
+
+            <div class="candy-section">
+                <div class="candy-section-title"><span>Sampling</span></div>
+                <small>Used for classification requests only — your roleplay preset is never modified. Lower temperature = more consistent labels. <b>0</b> is fully repeatable; <b>0.2–0.5</b> is a good range to experiment in. Leave a field blank to keep your preset's value.</small>
+                <label class="checkbox_label" for="candy-sampler-enabled"><input type="checkbox" id="candy-sampler-enabled"><span>Use these samplers for classification</span></label>
+                <div class="candy-row">
+                    <span>Presets:</span>
+                    <span class="menu_button candy-sampler-preset" data-preset="greedy" title="Fully deterministic - identical every time">Greedy</span>
+                    <span class="menu_button candy-sampler-preset" data-preset="precise" title="Low randomness, good default for classification">Precise</span>
+                    <span class="menu_button candy-sampler-preset" data-preset="balanced" title="A little more variety">Balanced</span>
+                </div>
+                <div class="candy-row nowrap">
+                    <label class="candy-grow">Temperature<br><input id="candy-temp" class="text_pole" type="number" min="0" max="5" step="0.05"></label>
+                    <label class="candy-grow">Top P<br><input id="candy-top-p" class="text_pole" type="number" min="0" max="1" step="0.01"></label>
+                </div>
+                <div class="candy-row nowrap">
+                    <label class="candy-grow">Top K<br><input id="candy-top-k" class="text_pole" type="number" min="0" max="200" step="1"></label>
+                    <label class="candy-grow">Min P<br><input id="candy-min-p" class="text_pole" type="number" min="0" max="1" step="0.01"></label>
+                </div>
+                <div class="candy-row nowrap">
+                    <label class="candy-grow">Repetition penalty<br><input id="candy-rep-pen" class="text_pole" type="number" min="1" max="2" step="0.01"></label>
+                    <label class="candy-grow">Max text sent (chars)<br><input id="candy-sample-chars" class="text_pole" type="number" min="200" max="8000" step="100"></label>
+                </div>
+                <label class="checkbox_label" for="candy-clear-stops" title="Roleplay stop strings can cut the reply off before the ANSWER line."><input type="checkbox" id="candy-clear-stops"><span>Ignore roleplay stop strings</span></label>
+                <label class="checkbox_label" for="candy-neutralize" title="DynaTemp, XTC, DRY and smoothing override or fight a fixed temperature."><input type="checkbox" id="candy-neutralize"><span>Switch off DynaTemp / XTC / DRY / smoothing</span></label>
+                <small>Top K, Min P and repetition penalty apply to text-completion backends (llama.cpp, KoboldCpp, ooba, TabbyAPI). Chat-completion endpoints only receive temperature and Top P.</small>
+            </div>
+
+            <div class="candy-section">
+                <div class="candy-section-title"><span>When to classify</span></div>
+                <small>Classification always reads <b>only the most recent AI message</b> — never your messages and never the chat history.</small>
+                <label class="checkbox_label" for="candy-trigger-swipe"><input type="checkbox" id="candy-trigger-swipe"><span>Re-classify when you swipe an AI message</span></label>
+                <label class="checkbox_label" for="candy-trigger-edit"><input type="checkbox" id="candy-trigger-edit"><span>Re-classify when an AI message is edited</span></label>
             </div>
 
             <div class="candy-section">
@@ -1152,8 +1258,10 @@ function wireSettingsPanel() {
         thinkBox.checked = !!s.thinkingEnabled;
         thinkBox.addEventListener('change', (e) => { settings().thinkingEnabled = e.target.checked; saveSettings(); });
     }
-    bindCheckbox('candy-deterministic', 'deterministic');
     bindCheckbox('candy-warn-missing', 'warnMissingSprite');
+    bindCheckbox('candy-trigger-swipe', 'triggerOnSwipe');
+    bindCheckbox('candy-trigger-edit', 'triggerOnEdit');
+    wireSamplerControls();
 
     const maxTok = $id('candy-max-tokens');
     if (maxTok) {
@@ -1202,6 +1310,101 @@ function wireSettingsPanel() {
     $id('candy-zip-input')?.addEventListener('change', onZipChosen);
 
     renderLabelList();
+}
+
+/** Sampler fields: id -> key in settings().sampler. Blank input = don't override. */
+const SAMPLER_FIELDS = {
+    'candy-temp': 'temperature',
+    'candy-top-p': 'top_p',
+    'candy-top-k': 'top_k',
+    'candy-min-p': 'min_p',
+    'candy-rep-pen': 'repetition_penalty',
+};
+
+function wireSamplerControls() {
+    const s = settings();
+    const $id = (id) => document.getElementById(id);
+
+    const enabled = $id('candy-sampler-enabled');
+    if (enabled) {
+        enabled.checked = !!s.sampler.enabled;
+        enabled.addEventListener('change', () => {
+            settings().sampler.enabled = enabled.checked;
+            saveSettings();
+            updateSamplerFieldState();
+        });
+    }
+
+    for (const [id, key] of Object.entries(SAMPLER_FIELDS)) {
+        const el = $id(id);
+        if (!el) continue;
+        el.value = s.sampler[key] ?? '';
+        el.addEventListener('change', () => {
+            const raw = el.value.trim();
+            settings().sampler[key] = raw === '' ? null : Number(raw);
+            saveSettings();
+        });
+    }
+
+    const chars = $id('candy-sample-chars');
+    if (chars) {
+        chars.value = s.maxSampleChars ?? 1400;
+        chars.addEventListener('change', () => {
+            const v = parseInt(chars.value, 10);
+            settings().maxSampleChars = Number.isFinite(v) ? Math.min(8000, Math.max(200, v)) : 1400;
+            chars.value = settings().maxSampleChars;
+            saveSettings();
+        });
+    }
+
+    const bindSamplerBool = (id, key) => {
+        const el = $id(id);
+        if (!el) return;
+        el.checked = !!s.sampler[key];
+        el.addEventListener('change', () => { settings().sampler[key] = el.checked; saveSettings(); });
+    };
+    bindSamplerBool('candy-clear-stops', 'clearStopStrings');
+    bindSamplerBool('candy-neutralize', 'neutralizeOthers');
+
+    for (const btn of document.querySelectorAll('.candy-sampler-preset')) {
+        btn.addEventListener('click', () => applySamplerPreset(btn.dataset.preset));
+    }
+
+    updateSamplerFieldState();
+}
+
+function applySamplerPreset(name) {
+    const preset = SAMPLER_PRESETS[name];
+    if (!preset) return;
+    const sp = settings().sampler;
+    for (const key of Object.values(SAMPLER_FIELDS)) {
+        if (preset[key] !== undefined) sp[key] = preset[key];
+    }
+    sp.enabled = true;
+    saveSettings();
+
+    // reflect in the inputs
+    const enabled = document.getElementById('candy-sampler-enabled');
+    if (enabled) enabled.checked = true;
+    for (const [id, key] of Object.entries(SAMPLER_FIELDS)) {
+        const el = document.getElementById(id);
+        if (el) el.value = sp[key] ?? '';
+    }
+    updateSamplerFieldState();
+    toastr?.info(`Sampler preset: ${preset.label}`, 'Candy Expressions', { timeOut: 1500 });
+}
+
+/** Grey out the sampler inputs when the override is switched off. */
+function updateSamplerFieldState() {
+    const on = !!settings().sampler.enabled;
+    const ids = [...Object.keys(SAMPLER_FIELDS), 'candy-clear-stops', 'candy-neutralize'];
+    for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !on;
+    }
+    for (const btn of document.querySelectorAll('.candy-sampler-preset')) {
+        btn.classList.toggle('candy-disabled', !on);
+    }
 }
 
 function populateFallbackSelect() {
@@ -1702,12 +1905,37 @@ function wireEvents() {
     if (!es || !et) { console.warn(`[${MODULE_NAME}] eventSource unavailable`); return; }
 
     es.on(et.CHAT_CHANGED, onChatChanged);
+
+    // An AI message finished rendering - the main trigger.
     es.on(et.CHARACTER_MESSAGE_RENDERED, () => triggerClassify());
+
+    // Streaming replies don't emit CHARACTER_MESSAGE_RENDERED, so cover them here.
+    // This fires after an AI generation, never when you send a message.
     es.on(et.GENERATION_ENDED, () => triggerClassify());
-    es.on(et.MESSAGE_SWIPED, () => triggerClassify());
-    es.on(et.MESSAGE_EDITED, () => triggerClassify());
-    es.on(et.MESSAGE_UPDATED, () => triggerClassify());
+
+    // Swiping / editing, but only when the affected message is an AI message.
+    es.on(et.MESSAGE_SWIPED, (id) => {
+        if (settings().triggerOnSwipe && isAiMessage(id)) triggerClassify();
+    });
+    es.on(et.MESSAGE_EDITED, onAiMessageMutated);
+    es.on(et.MESSAGE_UPDATED, onAiMessageMutated);
+
+    // Deleting can change which message is last; the dedupe key decides if work is needed.
     es.on(et.MESSAGE_DELETED, () => triggerClassify());
+
+    // Deliberately NOT hooked: MESSAGE_SENT and USER_MESSAGE_RENDERED.
+    // Your own messages never trigger classification.
+}
+
+/** True if the message at this index exists and was written by the character (not you, not the system). */
+function isAiMessage(mesId) {
+    const chat = getContext().chat || [];
+    const m = chat[Number(mesId)];
+    return !!m && !m.is_user && !m.is_system;
+}
+
+function onAiMessageMutated(mesId) {
+    if (settings().triggerOnEdit && isAiMessage(mesId)) triggerClassify();
 }
 
 // ------------------------------------------------------------------ //

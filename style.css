@@ -212,6 +212,15 @@
     min-width: 0;
 }
 
+.candy-settings .menu_button.candy-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.candy-settings input:disabled {
+    opacity: 0.45;
+}
+
 .candy-settings .menu_button.candy-primary {
     background: linear-gradient(135deg, rgba(255, 95, 162, 0.35), rgba(255, 95, 162, 0.12));
     border-color: rgba(255, 95, 162, 0.55);

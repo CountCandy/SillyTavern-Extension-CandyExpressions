@@ -79,13 +79,36 @@ That marker is what gets parsed, so **the reasoning format doesn't matter**. Whe
 
 Fallbacks, in order: `ANSWER:` line → JSON (`{"label":"joy"}`) → last matching word in the reply → substring match → your fallback label. Scanning from the *end* means reasoning that mentions other labels along the way doesn't fool it.
 
-### Consistency
+### Samplers (extension-only)
 
-**Deterministic classification** (on by default) forces greedy sampling — temperature 0, top_k 1, no stop strings — *for classification requests only*. Your roleplay preset is untouched.
+Classification has **its own sampler settings**, applied only to classification requests. Your roleplay preset is never modified.
 
-This matters a lot: without it, classification inherits your RP preset's temperature and top_p, so the *same message can classify differently every time*. Roleplay stop-strings can also truncate the reply before the answer line, which is why they're cleared too.
+This matters: without an override, classification inherits your RP temperature and top_p, so the *same message can classify differently every time*. Roleplay stop strings can also truncate the reply before the answer line, which is why they can be cleared.
+
+| Preset | Temp | Top P | Top K | Min P | Use when |
+|---|---|---|---|---|---|
+| **Greedy** | 0 | 1 | 1 | 0 | You want byte-identical results every run |
+| **Precise** (default) | 0.2 | 0.9 | 40 | 0.05 | General classification — consistent but not brittle |
+| **Balanced** | 0.5 | 0.9 | 40 | 0.05 | The model feels too rigid or keeps picking one label |
+
+There's no universal "correct" temperature — it's model-dependent, so treat these as starting points and tune. Lower is more repeatable; if your model keeps collapsing onto the same label regardless of the text, nudge it up. **Leave any field blank to keep your preset's value for that sampler.**
+
+Two helpers, both on by default:
+
+* **Ignore roleplay stop strings** — stop strings like `\n` would cut the reply off before the `ANSWER:` line.
+* **Switch off DynaTemp / XTC / DRY / smoothing** — these override or fight a fixed temperature, so a set temperature wouldn't mean much with them active.
+
+Top K, Min P and repetition penalty are sent to text-completion backends (llama.cpp, KoboldCpp, ooba, TabbyAPI). Chat-completion endpoints only accept temperature and Top P, so only those are sent there.
 
 **Reply token budget** (default 256) gives reasoning room to finish. If replies look cut off mid-thought, raise it.
+
+**Max text sent** (default 1400 chars) trims very long messages before classifying — the first and last halves are kept with the middle elided, so a long "short story" message still classifies on its opening and its ending.
+
+### What gets sent, and when
+
+Classification reads **only the single most recent AI message**. Never your messages, never the chat history, never the character card.
+
+It runs when an AI message finishes (including streamed ones), and optionally when you **swipe** or **edit** an AI message — both toggleable under *When to classify*. Editing or sending **your own** message never triggers it: `MESSAGE_SENT` and `USER_MESSAGE_RENDERED` are deliberately not hooked, and swipe/edit events are filtered to AI messages only. Repeat events are also de-duplicated, so the same text is never classified twice.
 
 ---
 
@@ -162,9 +185,11 @@ In the **Expression Library** section:
 | Show an emoji when no sprite is found | Last-resort emoji instead of a blank window. |
 | Classifier prompt | The system prompt. Macros: `{{labels}}`, `{{descriptions}}`, `{{fallback}}`, `{{thinking}}`. |
 | Make the classifier reason first | Ask for short reasoning before the `ANSWER:` line. Recommended. |
-| Deterministic classification | Force temperature 0 / top_k 1 for classification only, so results are repeatable. |
+| Use these samplers for classification | Extension-only temperature / Top P / Top K / Min P / rep penalty. |
 | Warn when a label has no sprite | Toast when a classified label has no image, instead of failing silently. |
 | Reply token budget | Room for reasoning + the answer line (default 256). |
+| Max text sent | Trim long messages before classifying (default 1400 chars). |
+| Re-classify on swipe / on edit | Whether swiping or editing an **AI** message re-runs classification. |
 | Fallback label | Used when nothing else matches. |
 | Test classifier | Classify the last message now and report the label **and** whether a sprite was found. |
 | View classification log | The exact prompt/reply audit trail (last 25 classifications). |
@@ -188,7 +213,9 @@ In the **Expression Library** section:
 
 **A label is chosen but no sprite appears.** That's the most common cause of "nothing happens": the classification worked, but that variant has no image for the chosen label. The log marks these entries **NO SPRITE**, and you get a toast (once per label per variant). Fix it by uploading `<label>.png` to that variant, turning on *Borrow a missing sprite from the default variant*, or enabling the emoji fallback. **Test classifier** tells you which of the two happened in one click.
 
-**The same message keeps giving different answers.** Turn on *Deterministic classification*. Your roleplay preset's temperature is otherwise randomising the result.
+**The same message keeps giving different answers.** Turn on the sampler override and lower the temperature (try the **Precise** or **Greedy** preset). Otherwise your roleplay preset's randomness decides the label.
+
+**It always picks the same label no matter what.** The opposite problem — try **Balanced**, or raise the temperature a little. Also check *Only offer labels that have a sprite*: if only one label has a sprite, that's the only thing it can choose.
 
 **Answers look truncated or the label is missing.** Raise the *Reply token budget*; reasoning models can spend a lot of it thinking.
 
