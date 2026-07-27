@@ -1,0 +1,312 @@
+/*
+ * Candy Expressions - styles
+ * Uses SillyTavern theme variables so it matches the active theme.
+ */
+
+/* ------------------------------------------------------------------ *
+ * In-chat sprite holder
+ * ------------------------------------------------------------------ */
+#candy-expression-holder {
+    position: fixed;
+    z-index: 30;
+    left: 12px;
+    bottom: 68px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    max-width: 45vw;
+    max-height: 75vh;
+    padding: 4px;
+    border-radius: 10px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
+    backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+    user-select: none;
+    touch-action: none;
+}
+
+#candy-expression-holder.candy-hidden {
+    display: none !important;
+}
+
+#candy-expression-holder.candy-chromeless {
+    background: transparent;
+    backdrop-filter: none;
+    box-shadow: none;
+    padding: 0;
+}
+
+#candy-expression-holder.candy-chromeless .candy-holder-header {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+#candy-expression-holder.candy-chromeless:hover .candy-holder-header {
+    opacity: 1;
+}
+
+.candy-holder-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.candy-drag-grabber {
+    cursor: move;
+    padding: 2px 4px;
+    opacity: 0.7;
+}
+
+.candy-drag-grabber:hover {
+    opacity: 1;
+}
+
+.candy-holder-header .candy-variant-select {
+    flex: 1;
+    min-width: 0;
+    height: 22px;
+    padding: 0 4px;
+    font-size: 0.75rem;
+    border-radius: 6px;
+    color: var(--SmartThemeBodyColor, #ddd);
+    background-color: var(--black30a, rgba(0, 0, 0, 0.3));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+}
+
+.candy-holder-header .candy-holder-btn {
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 2px 4px;
+}
+
+.candy-holder-header .candy-holder-btn:hover {
+    opacity: 1;
+}
+
+#candy-expression-image {
+    max-width: 100%;
+    max-height: calc(75vh - 34px);
+    object-fit: contain;
+    border-radius: 6px;
+    pointer-events: none;
+}
+
+#candy-expression-image[src=""],
+#candy-expression-image:not([src]) {
+    display: none;
+}
+
+.candy-emoji-fallback {
+    font-size: 90px;
+    line-height: 1;
+    text-align: center;
+    padding: 10px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings panel
+ * ------------------------------------------------------------------ */
+.candy-settings small {
+    opacity: 0.8;
+}
+
+.candy-settings .candy-section {
+    margin: 8px 0;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: 8px;
+}
+
+.candy-settings .candy-section > .candy-section-title {
+    font-weight: bold;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.candy-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 4px 0;
+}
+
+.candy-row.nowrap {
+    flex-wrap: nowrap;
+}
+
+.candy-grow {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Label library list */
+.candy-label-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.candy-label-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    background-color: var(--black30a, rgba(0, 0, 0, 0.2));
+}
+
+.candy-label-item .candy-label-name {
+    font-weight: bold;
+    min-width: 90px;
+}
+
+.candy-label-item .candy-label-name.candy-is-action {
+    color: var(--SmartThemeQuoteColor, #6cf);
+}
+
+.candy-label-item .candy-label-desc {
+    flex: 1;
+    min-width: 0;
+    opacity: 0.85;
+    font-size: 0.85em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.candy-badge {
+    font-size: 0.7em;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background-color: var(--SmartThemeQuoteColor, #6cf);
+    color: var(--SmartThemeBlurTintColor, #000);
+    opacity: 0.9;
+}
+
+.candy-badge.candy-badge-muted {
+    background-color: var(--grey50, #808080);
+}
+
+/* Variant sprite grid */
+.candy-variant-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+
+.candy-variant-tab {
+    cursor: pointer;
+    padding: 3px 10px;
+    border-radius: 14px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    background-color: var(--black30a, rgba(0, 0, 0, 0.2));
+}
+
+.candy-variant-tab.candy-active {
+    background-color: var(--SmartThemeQuoteColor, #6cf);
+    color: var(--SmartThemeBlurTintColor, #000);
+    font-weight: bold;
+}
+
+.candy-sprite-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.candy-sprite-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 5px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    background-color: var(--black30a, rgba(0, 0, 0, 0.15));
+    text-align: center;
+}
+
+.candy-sprite-tile.candy-missing {
+    opacity: 0.55;
+    border-style: dashed;
+}
+
+.candy-sprite-thumb {
+    width: 84px;
+    height: 84px;
+    object-fit: contain;
+    border-radius: 6px;
+    cursor: pointer;
+    background-color: var(--black50a, rgba(0, 0, 0, 0.35));
+}
+
+.candy-sprite-thumb.candy-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 30px;
+    opacity: 0.4;
+}
+
+.candy-sprite-label {
+    font-size: 0.78em;
+    max-width: 90px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.candy-sprite-label.candy-is-action {
+    color: var(--SmartThemeQuoteColor, #6cf);
+}
+
+.candy-sprite-actions {
+    display: flex;
+    gap: 8px;
+    font-size: 0.85em;
+}
+
+.candy-mini-btn {
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 0 2px;
+}
+
+.candy-mini-btn:hover {
+    opacity: 1;
+    color: var(--SmartThemeQuoteColor, #6cf);
+}
+
+.candy-danger:hover {
+    color: var(--fullred, #e04b4b) !important;
+}
+
+/* Popups */
+.candy-popup-block {
+    text-align: left;
+}
+
+.candy-popup-block textarea {
+    width: 100%;
+    min-height: 140px;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.85em;
+}
+
+.candy-hint {
+    opacity: 0.7;
+    font-size: 0.85em;
+    font-style: italic;
+}
