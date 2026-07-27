@@ -44,8 +44,9 @@ characters/<Character>/alien/joy.png
 
 ### Variants (sticky, manual)
 
-* A small **variant dropdown** sits on the in-chat sprite window.
+* A **variant button** sits in the toolbar next to the chat input (🎭 + the current variant name). Click it for a large, easy-to-hit picker.
 * You can also switch from the **wand menu → "Candy: Switch Variant"**, or with `/candy-variant`.
+* The sprite window shows the current variant name, but isn't clickable — so you can't knock it out of variant by accident.
 * The chosen variant is written to the chat's metadata, so re-opening the chat restores it. Different chats can sit in different variants.
 * Variant switching **does not** call the model — it just swaps which sprite folder is used.
 
@@ -76,14 +77,50 @@ Built for reasoning-capable classifiers (e.g. Gemma-class models). The classifie
 
 ---
 
+## Verifying what the classifier actually sees
+
+Because classification shares your main API connection, you may reasonably want proof that your **roleplay** system prompt, persona, and chat history aren't leaking into it. There's a built-in audit trail.
+
+**Extensions → Candy Expressions → Classifier → View classification log** (or the `/candy-log` command).
+
+Each entry records one classification round-trip:
+
+| Block | What it shows |
+|---|---|
+| Labels offered | Exactly which labels the model could choose from |
+| **System prompt** | The complete instruction text sent — the *only* instructions sent |
+| **User message** | The complete content sent — just the character's line |
+| **Raw model reply** | What came back verbatim, `<think>` blocks and all |
+
+If your roleplay prompt, persona, character card, or prior messages don't appear in those blocks, they weren't sent. Tick **"Also log every classification to the browser console"** to get the same dump in the F12 console as it happens.
+
+Two extra ways to cross-check:
+
+* Watch your backend's own log (llama.cpp / Ollama / TabbyAPI all print the incoming prompt). It should match the log entry exactly.
+* Temporarily set your classifier prompt to something distinctive like `Reply with only the word: banana`. If the reply is `banana`, nothing else is steering the model.
+
+Under the hood this uses SillyTavern's `generateRaw()` with an explicit `systemPrompt`, which builds a standalone prompt rather than the chat-generation pipeline — no character card, no persona, no history.
+
+---
+
 ## Managing variants & sprites
 
 Open **Extensions → Candy Expressions**. With a single-character chat open you get:
 
 * **Add variant(s)** — type one or more names (comma-separated, e.g. `armor, suit, alien`). Each becomes a sprite subfolder.
-* **Variant tabs** — pick which variant you're editing.
-* **Sprite grid** — every label in your library shown as a tile. Click **upload** on a tile to set that label's sprite, or **trash** to delete it. A `*` after a label means a sprite file exists that isn't in your library yet.
-* **Batch upload (ZIP)** — drop in a ZIP of images; **each image's file name becomes its label** (`charging.png` → `charging`). The fastest way to fill a whole variant at once.
+* **Variant tabs** — pick which variant you're editing. Sorted A→Z.
+* **Sprite grid** — every label as a tile, sorted A→Z with emotions and actions mixed together (actions are tinted orange). Click **upload** on a tile to set that label's sprite, **trash** to delete it, or the **thumbnail** to preview it in the chat window. A `*` marks a sprite whose label isn't in your library yet; a number badge shows how many sprites a label has.
+* **Batch upload images** — select **many images at once**; each is filed automatically by its name:
+
+  | file | lands under |
+  |---|---|
+  | `anger.png` | `anger` |
+  | `anger-0003.png` | `anger` |
+  | `anger.smug.png` | `anger` |
+
+  (Same rule SillyTavern itself uses: everything before the first `-` or `.` suffix.) Extra sprites for one label are all kept, and one is picked at random each time that expression fires. If any uploaded label isn't in your library, you're offered a one-click way to add them.
+* **ZIP** — SillyTavern's own ZIP endpoint. It's known to stall on some archives, so it's the fallback here, not the default; it now times out after 60s with a clear message instead of spinning on "Uploading…" forever.
+* **Delete all sprites** — wipes every sprite file in the selected variant (with a confirmation showing the exact count).
 * **Refresh** — reload sprites from disk.
 
 ### Adding expressions in bulk
@@ -114,6 +151,8 @@ In the **Expression Library** section:
 | Classifier prompt | The system prompt. Macros: `{{labels}}`, `{{descriptions}}`, `{{fallback}}`, `{{thinking}}`. |
 | Classifier may &lt;think&gt; | Allow reasoning and strip it. Configure the delimiters. |
 | Fallback label | Used when nothing else matches. |
+| View classification log | The exact prompt/reply audit trail (last 25 classifications). |
+| Log to browser console | Mirror every classification into the F12 console as it happens. |
 
 ---
 
@@ -124,6 +163,7 @@ In the **Expression Library** section:
 | `/candy-variant [name]` | Get the current variant, or switch to `name` (sticky, saved per chat). |
 | `/candy-emote <label>` | Manually set the sprite right now (volatile — the next message may change it). |
 | `/candy-classify [text]` | Classify `text` (or the last character message) and set the sprite. Returns the label. |
+| `/candy-log` | Open the classification log (exact prompt sent + raw reply). |
 | `/candy-refresh` | Reload sprites and re-classify the last message. |
 
 ---

@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS = {
     thinkPrefix: '<think>',
     thinkSuffix: '</think>',
     maxSampleChars: 1400,        // trim very long messages before classifying
+    debugLogging: false,         // also mirror each classification to the browser console
     // sprites / display
     defaultVariant: DEFAULT_VARIANT,
     fallbackExpression: 'neutral',
@@ -108,6 +109,8 @@ const state = {
     lastKey: null,        // dedupe key: variant + message text
     classifyBusy: false,
     classifyQueued: false,
+    /** @type {object[]} last N classification round-trips, newest first (see CLASSIFY_LOG_MAX) */
+    classifyLog: [],
     settingsCharKey: null, // which character the settings panel is currently showing
     settingsVariant: null, // which variant tab the settings panel is showing
 };
@@ -141,13 +144,13 @@ function migrateSettings() {
     saveSettings();
 }
 
-/** All library labels, tagged with isAction. */
+/** All library labels, tagged with isAction, sorted alphabetically (emotions and actions mixed). */
 function libraryEntries() {
     const s = settings();
     return [
         ...s.emotions.map(e => ({ label: e.label, description: e.description || '', isAction: false })),
         ...s.actions.map(a => ({ label: a.label, description: a.description || '', isAction: true })),
-    ];
+    ].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 // ------------------------------------------------------------------ //
@@ -178,14 +181,14 @@ function spriteFolder(charName, variant) {
     return `${charName}/${variant}`;
 }
 
-/** Registered variants for a character (always includes the default variant, default first). */
+/** Registered variants for a character (always includes the default variant), sorted alphabetically. */
 function getVariantsFor(avatarKey) {
     const s = settings();
     const rec = s.characters[avatarKey];
     const list = Array.isArray(rec?.variants) ? rec.variants.slice() : [];
     const def = s.defaultVariant || DEFAULT_VARIANT;
-    if (!list.includes(def)) list.unshift(def);
-    return list;
+    if (!list.includes(def)) list.push(def);
+    return [...new Set(list)].sort((a, b) => a.localeCompare(b));
 }
 
 function registerVariant(character, variant) {
@@ -270,17 +273,36 @@ async function uploadSprite(charName, variant, label, file, spriteName) {
     return res.json().catch(() => ({}));
 }
 
+const ZIP_TIMEOUT_MS = 60000;
+
 async function uploadSpriteZip(charName, variant, file) {
     const folder = spriteFolder(charName, variant);
     const form = new FormData();
     form.append('name', folder);
     form.append('avatar', file);
-    const res = await fetch('/api/sprites/upload-zip', {
-        method: 'POST',
-        headers: getContext().getRequestHeaders({ omitContentType: true }),
-        body: form,
-        cache: 'no-cache',
-    });
+
+    // SillyTavern's ZIP endpoint can stall on some archives and never respond,
+    // which would leave the UI stuck on "Uploading...". Bound the wait.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ZIP_TIMEOUT_MS);
+    let res;
+    try {
+        res = await fetch('/api/sprites/upload-zip', {
+            method: 'POST',
+            headers: getContext().getRequestHeaders({ omitContentType: true }),
+            body: form,
+            cache: 'no-cache',
+            signal: controller.signal,
+        });
+    } catch (err) {
+        if (err?.name === 'AbortError') {
+            throw new Error(`SillyTavern's ZIP endpoint did not respond within ${ZIP_TIMEOUT_MS / 1000}s. Use "Batch upload images" instead.`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+
     if (!res.ok) throw new Error(`ZIP upload failed (${res.status})`);
     invalidateSprites(charName, variant);
     return res.json().catch(() => ({}));
@@ -427,6 +449,7 @@ async function classifyText(text, { render = true } = {}) {
 
     const systemPrompt = buildClassifyPrompt(labels);
     const sampled = sampleText(text);
+    const started = Date.now();
 
     let raw = '';
     try {
@@ -434,6 +457,11 @@ async function classifyText(text, { render = true } = {}) {
         raw = await getContext().generateRaw({ prompt: sampled, systemPrompt });
     } catch (err) {
         console.error(`[${MODULE_NAME}] Classification request failed`, err);
+        recordClassification({
+            character: character.name, variant, labels, systemPrompt,
+            sentText: sampled, raw: '', label: null, ms: Date.now() - started,
+            error: String(err?.message || err),
+        });
         if (typeof toastr !== 'undefined') {
             toastr.error('Candy Expressions could not reach the classifier. Is an API connected?', 'Classification failed');
         }
@@ -441,9 +469,87 @@ async function classifyText(text, { render = true } = {}) {
     }
 
     const label = parseLabel(raw, labels, s.fallbackExpression);
+    recordClassification({
+        character: character.name, variant, labels, systemPrompt,
+        sentText: sampled, raw, label, ms: Date.now() - started, error: null,
+    });
     state.lastEmotion = label;
     if (render) await renderSprite(character.name, variant, label);
     return label;
+}
+
+const CLASSIFY_LOG_MAX = 25;
+
+/**
+ * Record one classification round-trip so it can be inspected later.
+ * This is the audit trail that proves exactly what was (and was not) sent.
+ */
+function recordClassification(entry) {
+    entry.time = new Date().toISOString();
+    state.classifyLog.unshift(entry);
+    if (state.classifyLog.length > CLASSIFY_LOG_MAX) state.classifyLog.length = CLASSIFY_LOG_MAX;
+
+    if (settings().debugLogging) {
+        console.groupCollapsed(`[${MODULE_NAME}] classify -> ${entry.label ?? 'FAILED'} (${entry.ms}ms)`);
+        console.log('character:', entry.character, '| variant:', entry.variant);
+        console.log('labels offered:', entry.labels.join(', '));
+        console.log('--- SYSTEM PROMPT (the ONLY instructions sent) ---\n' + entry.systemPrompt);
+        console.log('--- USER MESSAGE SENT ---\n' + entry.sentText);
+        console.log('--- RAW MODEL REPLY ---\n' + (entry.raw || '(none)'));
+        if (entry.error) console.warn('error:', entry.error);
+        console.groupEnd();
+    }
+}
+
+/**
+ * Show the classification log: for each round-trip, the exact system prompt and
+ * message that were sent, and the raw reply that came back (thinking included).
+ */
+async function showClassificationLog() {
+    const c = getContext();
+    const wrap = document.createElement('div');
+    wrap.className = 'candy-popup-block candy-log';
+
+    const title = document.createElement('h3');
+    title.textContent = 'Classification Log';
+    const hint = document.createElement('p');
+    hint.className = 'candy-hint';
+    hint.textContent = 'Everything below is the complete payload sent to the classifier. If your roleplay system prompt, persona, or chat history is not shown here, it was not sent.';
+    wrap.append(title, hint);
+
+    if (state.classifyLog.length === 0) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No classifications recorded yet. Send a character message first.';
+        wrap.append(empty);
+    }
+
+    for (const e of state.classifyLog) {
+        const det = document.createElement('details');
+        det.className = 'candy-log-entry';
+        const sum = document.createElement('summary');
+        const when = e.time.replace('T', ' ').replace(/\..*/, '');
+        sum.textContent = `${when} — ${e.character} / ${e.variant} → ${e.label ?? 'FAILED'} (${e.ms}ms)`;
+        det.append(sum);
+
+        const addBlock = (heading, body) => {
+            const h = document.createElement('div');
+            h.className = 'candy-log-heading';
+            h.textContent = heading;
+            const pre = document.createElement('pre');
+            pre.className = 'candy-log-pre';
+            pre.textContent = body || '(empty)';
+            det.append(h, pre);
+        };
+        addBlock(`Labels offered (${e.labels.length})`, e.labels.join(', '));
+        addBlock('SYSTEM PROMPT — the only instructions sent', e.systemPrompt);
+        addBlock('USER MESSAGE — the only content sent', e.sentText);
+        addBlock('RAW MODEL REPLY (thinking included)', e.raw);
+        if (e.error) addBlock('ERROR', e.error);
+        wrap.append(det);
+    }
+
+    const popup = new c.Popup(wrap, c.POPUP_TYPE.TEXT, '', { okButton: 'Close', allowVerticalScrolling: true, wide: true, large: true });
+    await popup.show();
 }
 
 /** Classify the latest character message (deduped, serialized). */
@@ -475,10 +581,12 @@ function ensureHolder() {
     if (document.getElementById('candy-expression-holder')) return;
     const holder = document.createElement('div');
     holder.id = 'candy-expression-holder';
+    // The variant is switched from the toolbar button, not from here - a tiny
+    // dropdown floating over the chat was too easy to hit by accident.
     holder.innerHTML = `
         <div class="candy-holder-header">
             <div class="candy-drag-grabber fa-solid fa-grip" title="Drag to move"></div>
-            <select class="candy-variant-select" title="Variant (sticky, saved per chat)"></select>
+            <span class="candy-variant-name" title="Current variant (change it from the toolbar button)"></span>
             <div class="candy-holder-btn candy-open-settings fa-solid fa-gear" title="Manage Candy Expressions"></div>
         </div>
         <img id="candy-expression-image" alt="" draggable="false">
@@ -493,7 +601,6 @@ function ensureHolder() {
         holder.style.bottom = 'auto';
     }
 
-    holder.querySelector('.candy-variant-select').addEventListener('change', onHolderVariantChange);
     holder.querySelector('.candy-open-settings').addEventListener('click', openSettingsPanel);
     makeDraggable(holder, holder.querySelector('.candy-drag-grabber'));
     applyHolderChrome();
@@ -594,18 +701,35 @@ function clearSprite() {
 // ------------------------------------------------------------------ //
 // In-chat variant selector (on the holder) + wand-menu quick switch
 // ------------------------------------------------------------------ //
+/** Reflect the current variant on the sprite window and the toolbar button. */
 function updateHolderVariantSelect() {
-    const select = document.querySelector('#candy-expression-holder .candy-variant-select');
-    if (!select) return;
-    const character = getActiveCharacter();
-    const variants = character ? getVariantsFor(character.avatarKey) : [settings().defaultVariant];
     const current = getCurrentVariant();
-    select.innerHTML = variants.map(v =>
-        `<option value="${escapeHtml(v)}"${v === current ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('');
+
+    const name = document.querySelector('#candy-expression-holder .candy-variant-name');
+    if (name) name.textContent = current;
+
+    const toolbarLabel = document.querySelector('#candy-toolbar-variant .candy-toolbar-label');
+    if (toolbarLabel) toolbarLabel.textContent = current;
 }
 
-async function onHolderVariantChange(e) {
-    await switchVariant(e.target.value);
+/** Toolbar button: big, fixed target next to the chat input. */
+function addToolbarButton(attempt = 0) {
+    if (document.getElementById('candy-toolbar-variant')) return;
+    const left = document.getElementById('leftSendForm');
+    if (!left) {
+        if (attempt < 20) setTimeout(() => addToolbarButton(attempt + 1), 500);
+        return;
+    }
+    const btn = document.createElement('div');
+    btn.id = 'candy-toolbar-variant';
+    btn.className = 'candy-toolbar-btn interactable';
+    btn.tabIndex = 0;
+    btn.title = 'Candy Expressions: switch variant (sticky, saved per chat)';
+    btn.innerHTML = '<i class="fa-solid fa-masks-theater"></i><span class="candy-toolbar-label"></span>';
+    btn.addEventListener('click', openVariantQuickSwitch);
+    btn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openVariantQuickSwitch(); } });
+    left.appendChild(btn);
+    updateHolderVariantSelect();
 }
 
 /** Change the sticky variant and re-render the current emotion in the new variant. */
@@ -651,20 +775,35 @@ async function openVariantQuickSwitch() {
     const hint = document.createElement('p');
     hint.className = 'candy-hint';
     hint.textContent = 'Sticky: stays until you change it, saved with this chat.';
-    const select = document.createElement('select');
-    select.className = 'text_pole';
-    for (const v of variants) {
-        const opt = document.createElement('option');
-        opt.value = v;
-        opt.textContent = v;
-        if (v === current) opt.selected = true;
-        select.appendChild(opt);
-    }
-    // Apply immediately on change (robust: no reliance on reading DOM after teardown).
-    select.addEventListener('change', () => { switchVariant(select.value); });
-    wrap.append(title, hint, select);
+    wrap.append(title, hint);
 
-    const popup = new c.Popup(wrap, c.POPUP_TYPE.TEXT, '', { okButton: 'Close', allowVerticalScrolling: true });
+    const list = document.createElement('div');
+    list.className = 'candy-variant-picker';
+    wrap.append(list);
+
+    /** @type {any} */
+    let popup;
+    for (const v of variants) {
+        const row = document.createElement('div');
+        row.className = 'candy-variant-option' + (v === current ? ' candy-active' : '');
+        row.tabIndex = 0;
+        const check = document.createElement('i');
+        check.className = v === current ? 'fa-solid fa-circle-check' : 'fa-regular fa-circle';
+        const name = document.createElement('span');
+        name.className = 'candy-variant-option-name';
+        name.textContent = v;
+        row.append(check, name);
+
+        const choose = async () => {
+            await switchVariant(v);
+            popup?.completeAffirmative?.();
+        };
+        row.addEventListener('click', choose);
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+        list.append(row);
+    }
+
+    popup = new c.Popup(wrap, c.POPUP_TYPE.TEXT, '', { okButton: 'Close', allowVerticalScrolling: true });
     await popup.show();
 }
 
@@ -681,6 +820,11 @@ function sanitizeVariantName(name) {
 
 function sanitizeLabelName(name) {
     return String(name || '').trim().replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+}
+
+/** Sprite file names may keep "-" and "." suffixes (anger-0003, anger.smug). */
+function sanitizeSpriteName(name) {
+    return String(name || '').trim().replace(/[^a-zA-Z0-9_.-]/g, '').toLowerCase();
 }
 
 // ------------------------------------------------------------------ //
@@ -718,6 +862,10 @@ const SETTINGS_HTML = `
                 <div class="candy-row nowrap">
                     <label class="candy-grow">Fallback label<br><select id="candy-fallback" class="text_pole"></select></label>
                 </div>
+                <div class="candy-row">
+                    <span class="menu_button" id="candy-view-log" title="See the exact prompt and reply for recent classifications"><i class="fa-solid fa-magnifying-glass"></i> View classification log</span>
+                </div>
+                <label class="checkbox_label" for="candy-debug"><input type="checkbox" id="candy-debug"><span>Also log every classification to the browser console (F12)</span></label>
             </div>
 
             <div class="candy-section">
@@ -740,16 +888,19 @@ const SETTINGS_HTML = `
                 <div id="candy-char-name" class="candy-hint"></div>
                 <div class="candy-variant-tabs" id="candy-variant-tabs"></div>
                 <div class="candy-row">
-                    <span class="menu_button" id="candy-zip-upload" title="Each image's file name becomes its label"><i class="fa-solid fa-file-zipper"></i> Batch upload ZIP</span>
+                    <span class="menu_button candy-primary" id="candy-batch-images" title="Select many images at once - each file is filed under the label in its name (anger-0003.png goes to anger)"><i class="fa-solid fa-images"></i> Batch upload images</span>
+                    <span class="menu_button" id="candy-zip-upload" title="Upload a ZIP of images (SillyTavern's own ZIP endpoint - can be flaky; prefer Batch upload images)"><i class="fa-solid fa-file-zipper"></i> ZIP</span>
                     <span class="menu_button" id="candy-refresh-sprites"><i class="fa-solid fa-rotate"></i> Refresh</span>
-                    <span class="menu_button candy-danger" id="candy-delete-variant"><i class="fa-solid fa-trash-can"></i> Remove variant</span>
+                    <span class="menu_button candy-danger" id="candy-clear-variant" title="Delete every sprite file in this variant"><i class="fa-solid fa-eraser"></i> Delete all sprites</span>
+                    <span class="menu_button candy-danger" id="candy-delete-variant" title="Remove the variant from the list (sprite files are kept)"><i class="fa-solid fa-folder-minus"></i> Remove variant</span>
                 </div>
                 <div class="candy-sprite-grid" id="candy-sprite-grid"></div>
-                <p class="candy-hint">Tip: sprites live in <tt>/characters/&lt;name&gt;/&lt;variant&gt;/&lt;label&gt;.png</tt>. A <tt>*</tt> after a label means a sprite exists that isn't in your library.</p>
+                <p class="candy-hint">Sprites live in <tt>/characters/&lt;name&gt;/&lt;variant&gt;/&lt;label&gt;.png</tt>. Batch upload sorts by file name: <tt>anger.png</tt>, <tt>anger-0003.png</tt> and <tt>anger.smug.png</tt> all land under <b>anger</b>. A <tt>*</tt> marks a sprite whose label isn't in your library.</p>
             </div>
         </div>
     </div>
     <input type="file" id="candy-file-input" accept="image/*" hidden>
+    <input type="file" id="candy-batch-input" accept="image/*" multiple hidden>
     <input type="file" id="candy-zip-input" accept="application/zip,.zip" hidden>
 </div>`;
 
@@ -819,6 +970,19 @@ function wireSettingsPanel() {
     $id('candy-add-variant')?.addEventListener('click', addVariantDialog);
     $id('candy-delete-variant')?.addEventListener('click', deleteVariantDialog);
     $id('candy-refresh-sprites')?.addEventListener('click', async () => { await refreshActiveSprites(); });
+    $id('candy-view-log')?.addEventListener('click', showClassificationLog);
+    const debugBox = $id('candy-debug');
+    if (debugBox) {
+        debugBox.checked = !!s.debugLogging;
+        debugBox.addEventListener('change', (e) => { settings().debugLogging = e.target.checked; saveSettings(); });
+    }
+
+    $id('candy-batch-images')?.addEventListener('click', () => {
+        const input = $id('candy-batch-input');
+        if (input) { input.value = ''; input.click(); }
+    });
+    $id('candy-batch-input')?.addEventListener('change', onBatchImagesChosen);
+    $id('candy-clear-variant')?.addEventListener('click', clearVariantSpritesDialog);
     $id('candy-zip-upload')?.addEventListener('click', () => $id('candy-zip-input')?.click());
     $id('candy-variant-tabs')?.addEventListener('click', onVariantTabClick);
     $id('candy-sprite-grid')?.addEventListener('click', onSpriteGridClick);
@@ -1034,16 +1198,26 @@ async function renderSpriteGrid() {
 
     const entries = libraryEntries();
     const libLabels = new Set(entries.map(e => e.label));
-    const extraLabels = [...new Set(sprites.map(s => s.label))].filter(l => !libLabels.has(l));
 
-    const tile = (label, isAction, files, isExtra) => {
-        const file = files && files.length ? files[0] : null;
+    // Library labels + any on-disk labels not in the library, all mixed and sorted A-Z.
+    const all = [
+        ...entries.map(e => ({ label: e.label, isAction: e.isAction, isExtra: false })),
+        ...[...new Set(sprites.map(s => s.label))]
+            .filter(l => !libLabels.has(l))
+            .map(l => ({ label: l, isAction: false, isExtra: true })),
+    ].sort((a, b) => a.label.localeCompare(b.label));
+
+    const tile = ({ label, isAction, isExtra }) => {
+        const files = byLabel[label] || [];
+        const file = files.length ? files[0] : null;
+        const extraCount = files.length > 1 ? `<span class="candy-sprite-count" title="${files.length} sprites for this label">${files.length}</span>` : '';
         return `
         <div class="candy-sprite-tile ${file ? '' : 'candy-missing'}" data-label="${escapeHtml(label)}">
             ${file
-                ? `<img class="candy-sprite-thumb" src="${file.url}" title="${escapeHtml(label)}" data-file="${escapeHtml(file.fileName)}">`
+                ? `<img class="candy-sprite-thumb" src="${file.url}" title="${escapeHtml(label)} — click to preview" data-file="${escapeHtml(file.fileName)}" loading="lazy">`
                 : '<div class="candy-sprite-thumb candy-placeholder"><i class="fa-solid fa-image"></i></div>'}
-            <div class="candy-sprite-label ${isAction ? 'candy-is-action' : ''}">${escapeHtml(label)}${isExtra ? ' *' : ''}</div>
+            ${extraCount}
+            <div class="candy-sprite-label ${isAction ? 'candy-is-action' : ''}${isExtra ? ' candy-is-extra' : ''}" title="${escapeHtml(label)}${isExtra ? ' (not in your library)' : ''}">${escapeHtml(label)}${isExtra ? ' *' : ''}</div>
             <div class="candy-sprite-actions">
                 <span class="candy-mini-btn fa-solid fa-upload candy-upload-sprite" title="Upload sprite"></span>
                 ${file ? `<span class="candy-mini-btn fa-solid fa-trash-can candy-danger candy-del-sprite" title="Delete sprite" data-file="${escapeHtml(file.fileName)}"></span>` : ''}
@@ -1051,9 +1225,7 @@ async function renderSpriteGrid() {
         </div>`;
     };
 
-    const tiles = entries.map(e => tile(e.label, e.isAction, byLabel[e.label], false));
-    for (const l of extraLabels) tiles.push(tile(l, false, byLabel[l], true));
-    grid.innerHTML = tiles.join('');
+    grid.innerHTML = all.map(tile).join('');
 }
 
 async function onSpriteGridClick(ev) {
@@ -1100,6 +1272,119 @@ async function onSpriteFileChosen(ev) {
     }
 }
 
+/**
+ * Derive the expression label from a sprite file name, mirroring SillyTavern's
+ * own server-side rule: everything before the first "-" or "." suffix.
+ *   anger.png -> anger | anger-0003.png -> anger | anger.smug.png -> anger
+ */
+function deriveLabelFromFileName(fileName) {
+    const base = String(fileName).replace(/\.[^/.]+$/, '').toLowerCase();
+    return base.match(/^(.+?)(?:[-.].*?)?$/)?.[1] ?? base;
+}
+
+/** Batch upload: many images at once, each auto-filed under the label in its name. */
+async function onBatchImagesChosen(ev) {
+    const files = [...(ev.target.files || [])];
+    const character = getActiveCharacter();
+    if (!files.length || !character) { ev.target.value = ''; return; }
+
+    const variant = state.settingsVariant || getCurrentVariant();
+    const plan = files.map(file => {
+        const base = file.name.replace(/\.[^/.]+$/, '').toLowerCase();
+        return { file, label: deriveLabelFromFileName(file.name), spriteName: sanitizeSpriteName(base) };
+    }).filter(p => p.label && p.spriteName);
+
+    if (!plan.length) {
+        toastr?.warning('No usable file names found.', 'Candy Expressions');
+        ev.target.value = '';
+        return;
+    }
+
+    const progress = toastr?.info(`Uploading 0/${plan.length}…`, 'Candy Expressions', { timeOut: 0, extendedTimeOut: 0 });
+    let done = 0;
+    const failed = [];
+    // Sequential: the sprite endpoint rewrites a whole folder per call, so parallel
+    // uploads into the same folder can race.
+    for (const p of plan) {
+        try {
+            await uploadSprite(character.name, variant, p.label, p.file, p.spriteName);
+        } catch (err) {
+            console.error(`[${MODULE_NAME}] Failed to upload ${p.file.name}`, err);
+            failed.push(p.file.name);
+        }
+        done++;
+        if (progress?.find) {
+            const el = progress.find('.toast-message');
+            if (el?.length) el.text(`Uploading ${done}/${plan.length}…`);
+        }
+    }
+    toastr?.clear(progress);
+
+    const okCount = plan.length - failed.length;
+    if (okCount) toastr?.success(`Uploaded ${okCount} sprite(s) to "${variant}".`, 'Candy Expressions');
+    if (failed.length) toastr?.error(`${failed.length} failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`, 'Candy Expressions');
+
+    // Offer to add any labels that aren't in the library yet.
+    const known = new Set(libraryEntries().map(e => e.label));
+    const unknown = [...new Set(plan.map(p => p.label))].filter(l => !known.has(l));
+    if (unknown.length) {
+        const add = await getContext().Popup.show.confirm(
+            'Add new labels?',
+            `${unknown.length} uploaded sprite(s) use labels that aren't in your Expression Library yet:<br><br><tt>${escapeHtml(unknown.join(', '))}</tt><br><br>Add them so the classifier can choose them?`,
+        );
+        if (add) {
+            for (const label of unknown) {
+                if (!findEntry(label)) settings().emotions.push({ label, description: '' });
+            }
+            saveSettings();
+            renderLabelList();
+            populateFallbackSelect();
+        }
+    }
+
+    await renderSpriteGrid();
+    renderCurrent();
+    ev.target.value = '';
+}
+
+/** Delete every sprite file in the active variant. */
+async function clearVariantSpritesDialog() {
+    const character = getActiveCharacter();
+    if (!character) { toastr?.warning('Open a character chat first.', 'Candy Expressions'); return; }
+    const variant = state.settingsVariant || getCurrentVariant();
+    const sprites = await loadSprites(character.name, variant, true);
+
+    if (!sprites.length) {
+        toastr?.info(`"${variant}" has no sprites to delete.`, 'Candy Expressions');
+        return;
+    }
+
+    const ok = await getContext().Popup.show.confirm(
+        'Delete all sprites',
+        `Permanently delete all <b>${sprites.length}</b> sprite file(s) in <tt>${escapeHtml(character.name)}/${escapeHtml(variant)}</tt>?<br><br><span class="candy-hint">This deletes the image files from disk. It cannot be undone.</span>`,
+    );
+    if (!ok) return;
+
+    const progress = toastr?.info(`Deleting 0/${sprites.length}…`, 'Candy Expressions', { timeOut: 0, extendedTimeOut: 0 });
+    let done = 0, failed = 0;
+    for (const sp of sprites) {
+        const success = await deleteSprite(character.name, variant, sp.label, sp.fileName).catch(() => false);
+        if (!success) failed++;
+        done++;
+        if (progress?.find) {
+            const el = progress.find('.toast-message');
+            if (el?.length) el.text(`Deleting ${done}/${sprites.length}…`);
+        }
+    }
+    toastr?.clear(progress);
+    if (failed) toastr?.error(`${failed} sprite(s) could not be deleted.`, 'Candy Expressions');
+    else toastr?.success(`Deleted ${sprites.length} sprite(s) from "${variant}".`, 'Candy Expressions');
+
+    await renderSpriteGrid();
+    clearSprite();
+    renderCurrent();
+}
+
 async function onZipChosen(ev) {
     const file = ev.target.files[0];
     const character = getActiveCharacter();
@@ -1115,7 +1400,7 @@ async function onZipChosen(ev) {
     } catch (err) {
         toastr?.clear(waiting);
         console.error(err);
-        toastr?.error('ZIP upload failed.', 'Candy Expressions');
+        toastr?.error(String(err?.message || 'ZIP upload failed.'), 'Candy Expressions', { timeOut: 10000 });
     } finally {
         ev.target.value = '';
     }
@@ -1286,6 +1571,12 @@ function registerSlashCommands() {
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'candy-log',
+        helpString: 'Show the Candy Expressions classification log: the exact prompt sent to the classifier and the raw reply.',
+        callback: async () => { await showClassificationLog(); return ''; },
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'candy-refresh',
         helpString: 'Reload Candy Expressions sprites and re-classify the last message.',
         callback: async () => {
@@ -1309,6 +1600,7 @@ jQuery(async () => {
         injectSettingsPanel();
         addWandMenuEntry();
         setTimeout(addWandMenuEntry, 2000); // wand menu may build late
+        addToolbarButton();
         registerSlashCommands();
         wireEvents();
 

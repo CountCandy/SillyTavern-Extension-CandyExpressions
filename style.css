@@ -1,7 +1,59 @@
 /*
  * Candy Expressions - styles
- * Uses SillyTavern theme variables so it matches the active theme.
+ * Built on SillyTavern theme variables so it inherits the active theme,
+ * with a candy accent for the bits that belong to this extension.
  */
+
+#candy-settings-root,
+#candy-expression-holder,
+.candy-popup-block {
+    --candy-accent: #ff5fa2;
+    --candy-accent-soft: rgba(255, 95, 162, 0.16);
+    --candy-action: #ffb454;
+    --candy-line: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    --candy-panel: rgba(127, 127, 127, 0.09);
+}
+
+/* ------------------------------------------------------------------ *
+ * Toolbar button (next to the chat input)
+ * ------------------------------------------------------------------ */
+#candy-toolbar-variant {
+    --candy-accent: #ff5fa2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    margin: 0 2px;
+    padding: 0 10px;
+    cursor: pointer;
+    border-radius: 14px;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    color: var(--SmartThemeBodyColor, #ddd);
+    background: linear-gradient(135deg, rgba(255, 95, 162, 0.22), rgba(255, 95, 162, 0.08));
+    border: 1px solid rgba(255, 95, 162, 0.45);
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+#candy-toolbar-variant:hover {
+    background: linear-gradient(135deg, rgba(255, 95, 162, 0.38), rgba(255, 95, 162, 0.16));
+    border-color: var(--candy-accent);
+}
+
+#candy-toolbar-variant:active {
+    transform: scale(0.97);
+}
+
+#candy-toolbar-variant i {
+    color: var(--candy-accent);
+}
+
+#candy-toolbar-variant .candy-toolbar-label {
+    max-width: 12ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 600;
+}
 
 /* ------------------------------------------------------------------ *
  * In-chat sprite holder
@@ -17,11 +69,12 @@
     gap: 4px;
     max-width: 45vw;
     max-height: 75vh;
-    padding: 4px;
-    border-radius: 10px;
+    padding: 5px;
+    border-radius: 12px;
     background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
     backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--candy-line);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     user-select: none;
     touch-action: none;
 }
@@ -34,6 +87,7 @@
     background: transparent;
     backdrop-filter: none;
     box-shadow: none;
+    border-color: transparent;
     padding: 0;
 }
 
@@ -50,47 +104,46 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     color: var(--SmartThemeBodyColor, #ddd);
 }
 
 .candy-drag-grabber {
     cursor: move;
     padding: 2px 4px;
-    opacity: 0.7;
+    opacity: 0.6;
 }
 
 .candy-drag-grabber:hover {
     opacity: 1;
 }
 
-.candy-holder-header .candy-variant-select {
+.candy-holder-header .candy-variant-name {
     flex: 1;
     min-width: 0;
-    height: 22px;
-    padding: 0 4px;
-    font-size: 0.75rem;
-    border-radius: 6px;
-    color: var(--SmartThemeBodyColor, #ddd);
-    background-color: var(--black30a, rgba(0, 0, 0, 0.3));
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--candy-accent);
 }
 
 .candy-holder-header .candy-holder-btn {
     cursor: pointer;
-    opacity: 0.7;
+    opacity: 0.6;
     padding: 2px 4px;
 }
 
 .candy-holder-header .candy-holder-btn:hover {
     opacity: 1;
+    color: var(--candy-accent);
 }
 
 #candy-expression-image {
     max-width: 100%;
     max-height: calc(75vh - 34px);
     object-fit: contain;
-    border-radius: 6px;
+    border-radius: 8px;
     pointer-events: none;
 }
 
@@ -110,23 +163,36 @@
  * Settings panel
  * ------------------------------------------------------------------ */
 .candy-settings small {
-    opacity: 0.8;
+    opacity: 0.75;
+    display: block;
+    margin-bottom: 4px;
 }
 
 .candy-settings .candy-section {
-    margin: 8px 0;
-    padding: 8px;
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    margin: 10px 0;
+    padding: 10px;
+    border: 1px solid var(--candy-line);
+    border-left: 3px solid var(--candy-accent);
     border-radius: 8px;
+    background-color: var(--candy-panel);
 }
 
 .candy-settings .candy-section > .candy-section-title {
-    font-weight: bold;
-    margin-bottom: 4px;
+    font-weight: 700;
+    font-size: 1.02em;
+    letter-spacing: 0.02em;
+    margin-bottom: 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--candy-line);
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 6px;
+    flex-wrap: wrap;
+}
+
+.candy-settings .candy-section > .candy-section-title > span:first-child {
+    color: var(--candy-accent);
 }
 
 .candy-row {
@@ -134,7 +200,7 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    margin: 4px 0;
+    margin: 6px 0;
 }
 
 .candy-row.nowrap {
@@ -146,12 +212,22 @@
     min-width: 0;
 }
 
+.candy-settings .menu_button.candy-primary {
+    background: linear-gradient(135deg, rgba(255, 95, 162, 0.35), rgba(255, 95, 162, 0.12));
+    border-color: rgba(255, 95, 162, 0.55);
+    font-weight: 600;
+}
+
+.candy-settings .menu_button.candy-primary:hover {
+    background: linear-gradient(135deg, rgba(255, 95, 162, 0.5), rgba(255, 95, 162, 0.2));
+}
+
 /* Label library list */
 .candy-label-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    max-height: 220px;
+    gap: 3px;
+    max-height: 260px;
     overflow-y: auto;
     padding-right: 4px;
 }
@@ -159,25 +235,32 @@
 .candy-label-item {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 6px;
+    gap: 8px;
+    padding: 4px 8px;
     border-radius: 6px;
-    background-color: var(--black30a, rgba(0, 0, 0, 0.2));
+    background-color: var(--candy-panel);
+    border-left: 2px solid transparent;
+    transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.candy-label-item:hover {
+    background-color: var(--candy-accent-soft);
+    border-left-color: var(--candy-accent);
 }
 
 .candy-label-item .candy-label-name {
-    font-weight: bold;
-    min-width: 90px;
+    font-weight: 600;
+    min-width: 96px;
 }
 
 .candy-label-item .candy-label-name.candy-is-action {
-    color: var(--SmartThemeQuoteColor, #6cf);
+    color: var(--candy-action);
 }
 
 .candy-label-item .candy-label-desc {
     flex: 1;
     min-width: 0;
-    opacity: 0.85;
+    opacity: 0.7;
     font-size: 0.85em;
     white-space: nowrap;
     overflow: hidden;
@@ -185,71 +268,93 @@
 }
 
 .candy-badge {
-    font-size: 0.7em;
-    padding: 1px 5px;
+    font-size: 0.68em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
     border-radius: 8px;
-    background-color: var(--SmartThemeQuoteColor, #6cf);
-    color: var(--SmartThemeBlurTintColor, #000);
-    opacity: 0.9;
+    background-color: var(--candy-action);
+    color: #241a08;
+    font-weight: 700;
 }
 
 .candy-badge.candy-badge-muted {
     background-color: var(--grey50, #808080);
 }
 
-/* Variant sprite grid */
+/* Variant tabs */
 .candy-variant-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: 6px;
+    gap: 5px;
+    margin: 8px 0 6px;
 }
 
 .candy-variant-tab {
     cursor: pointer;
-    padding: 3px 10px;
+    padding: 4px 14px;
     border-radius: 14px;
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
-    background-color: var(--black30a, rgba(0, 0, 0, 0.2));
+    font-size: 0.9em;
+    border: 1px solid var(--candy-line);
+    background-color: var(--candy-panel);
+    transition: all 0.13s ease;
+}
+
+.candy-variant-tab:hover {
+    border-color: var(--candy-accent);
+    background-color: var(--candy-accent-soft);
 }
 
 .candy-variant-tab.candy-active {
-    background-color: var(--SmartThemeQuoteColor, #6cf);
-    color: var(--SmartThemeBlurTintColor, #000);
-    font-weight: bold;
+    background: linear-gradient(135deg, var(--candy-accent), #ff8ec0);
+    border-color: var(--candy-accent);
+    color: #2a0d1a;
+    font-weight: 700;
 }
 
+/* Sprite grid */
 .candy-sprite-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
     gap: 8px;
-    margin-top: 6px;
+    margin-top: 8px;
 }
 
 .candy-sprite-tile {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
-    padding: 5px;
-    border-radius: 8px;
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
-    background-color: var(--black30a, rgba(0, 0, 0, 0.15));
+    gap: 4px;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid var(--candy-line);
+    background-color: var(--candy-panel);
     text-align: center;
+    transition: border-color 0.13s ease, transform 0.1s ease;
+}
+
+.candy-sprite-tile:hover {
+    border-color: var(--candy-accent);
+    transform: translateY(-1px);
 }
 
 .candy-sprite-tile.candy-missing {
-    opacity: 0.55;
+    opacity: 0.5;
     border-style: dashed;
 }
 
+.candy-sprite-tile.candy-missing:hover {
+    opacity: 0.85;
+}
+
 .candy-sprite-thumb {
-    width: 84px;
-    height: 84px;
+    width: 88px;
+    height: 88px;
     object-fit: contain;
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
-    background-color: var(--black50a, rgba(0, 0, 0, 0.35));
+    background-color: rgba(0, 0, 0, 0.28);
 }
 
 .candy-sprite-thumb.candy-placeholder {
@@ -257,45 +362,75 @@
     align-items: center;
     justify-content: center;
     font-size: 30px;
-    opacity: 0.4;
+    opacity: 0.35;
+    cursor: default;
+}
+
+.candy-sprite-count {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    font-size: 0.7em;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+    color: #2a0d1a;
+    background-color: var(--candy-accent);
 }
 
 .candy-sprite-label {
-    font-size: 0.78em;
-    max-width: 90px;
+    font-size: 0.8em;
+    max-width: 96px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .candy-sprite-label.candy-is-action {
-    color: var(--SmartThemeQuoteColor, #6cf);
+    color: var(--candy-action);
+    font-weight: 600;
+}
+
+.candy-sprite-label.candy-is-extra {
+    font-style: italic;
+    opacity: 0.8;
 }
 
 .candy-sprite-actions {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     font-size: 0.85em;
 }
 
 .candy-mini-btn {
     cursor: pointer;
-    opacity: 0.7;
+    opacity: 0.65;
     padding: 0 2px;
+    transition: opacity 0.12s ease, color 0.12s ease;
 }
 
 .candy-mini-btn:hover {
     opacity: 1;
-    color: var(--SmartThemeQuoteColor, #6cf);
+    color: var(--candy-accent);
 }
 
 .candy-danger:hover {
     color: var(--fullred, #e04b4b) !important;
 }
 
-/* Popups */
+/* ------------------------------------------------------------------ *
+ * Popups
+ * ------------------------------------------------------------------ */
 .candy-popup-block {
     text-align: left;
+}
+
+.candy-popup-block h3 {
+    color: var(--candy-accent);
+    margin-bottom: 2px;
 }
 
 .candy-popup-block textarea {
@@ -309,4 +444,88 @@
     opacity: 0.7;
     font-size: 0.85em;
     font-style: italic;
+}
+
+/* Variant picker (toolbar button popup) */
+.candy-variant-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.candy-variant-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 14px;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 1.02em;
+    border: 1px solid var(--candy-line);
+    background-color: var(--candy-panel);
+    transition: all 0.13s ease;
+}
+
+.candy-variant-option:hover,
+.candy-variant-option:focus-visible {
+    border-color: var(--candy-accent);
+    background-color: var(--candy-accent-soft);
+    outline: none;
+}
+
+.candy-variant-option.candy-active {
+    border-color: var(--candy-accent);
+    background: linear-gradient(135deg, rgba(255, 95, 162, 0.28), rgba(255, 95, 162, 0.08));
+    font-weight: 700;
+}
+
+.candy-variant-option i {
+    color: var(--candy-accent);
+}
+
+.candy-variant-option-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Classification log */
+.candy-log-entry {
+    margin: 6px 0;
+    padding: 6px 10px;
+    border: 1px solid var(--candy-line);
+    border-left: 3px solid var(--candy-accent);
+    border-radius: 7px;
+    background-color: var(--candy-panel);
+}
+
+.candy-log-entry > summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.candy-log-heading {
+    margin-top: 8px;
+    font-size: 0.76em;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--candy-accent);
+}
+
+.candy-log-pre {
+    margin: 3px 0 0;
+    padding: 8px 10px;
+    max-height: 260px;
+    overflow: auto;
+    border-radius: 6px;
+    background-color: rgba(0, 0, 0, 0.3);
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.78em;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
