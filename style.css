@@ -76,19 +76,43 @@
     padding: 5px;
     border-radius: 12px;
     border: 1px solid var(--candy-line);
-    background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
-    backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    background: transparent;
     user-select: none;
     touch-action: none;
     /* Drag anywhere on the frame to move; bottom-right corner resizes. */
     cursor: move;
     resize: both;
     overflow: hidden;
+    isolation: isolate;
 }
 
+/*
+ * The panel behind the sprite is its own layer, so its opacity is independent
+ * of the sprite's. Default is fully transparent - the chat stays readable
+ * through the window - and it can be dialled up for contrast.
+ */
+#candy-expression-holder::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 12px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
+    backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    opacity: var(--candy-frame-alpha, 0);
+    pointer-events: none;
+}
+
+#candy-expression-holder > * {
+    position: relative;
+    z-index: 1;
+}
+
+/* Feedback while dragging - deliberately not opacity, so transparency
+   looks identical whether the window is moving or at rest. */
 #candy-expression-holder.candy-dragging {
-    opacity: 0.92;
+    border-color: var(--candy-accent);
 }
 
 #candy-expression-holder.candy-hidden {
@@ -96,11 +120,12 @@
 }
 
 #candy-expression-holder.candy-chromeless {
-    background: transparent;
-    backdrop-filter: none;
-    box-shadow: none;
     border-color: transparent;
     padding: 0;
+}
+
+#candy-expression-holder.candy-chromeless::before {
+    display: none;
 }
 
 #candy-expression-holder.candy-chromeless .candy-holder-header {

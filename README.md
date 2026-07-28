@@ -209,6 +209,7 @@ In the **Expression Library** section:
 | Show in-chat sprite window | Show/hide the floating sprite. Drag it by the grip; position and size are remembered. |
 | Chromeless window | Hide the sprite window's frame/background entirely. |
 | Sprite opacity | Fade the character sprite itself, 10–100%. |
+| Frame background | The panel behind the sprite, 0–100%. Defaults to 0 so the chat reads straight through the window. |
 | Remember each message's expression | Store the label on the message and reuse it instead of re-classifying. |
 | Only offer labels that have a sprite | Restrict the classifier to labels that actually have a sprite in the active variant. |
 | Borrow a missing sprite from the default variant | If a variant lacks a sprite for the chosen label, fall back to the `default` variant. |

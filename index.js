@@ -176,6 +176,7 @@ const DEFAULT_SETTINGS = {
     showSpriteWindow: true,      // show the in-chat sprite holder
     chromeless: false,           // hide the holder background/frame
     spriteOpacity: 1,            // fades the character sprite itself (0.1 - 1)
+    frameOpacity: 0,             // panel behind the sprite; 0 keeps the chat readable through it
     holder: { x: null, y: null, w: null, h: null }, // saved holder position and size
     rememberLabels: true,        // store the chosen label on the message and reuse it
     // label library (shared across characters)
@@ -990,7 +991,6 @@ function ensureHolder() {
             <span class="candy-variant-name" title="Current variant (change it from the toolbar button)"></span>
             <div class="candy-holder-btn candy-pin-indicator fa-solid fa-thumbtack" title="Pinned by you - click to unpin and let the classifier decide again" style="display:none;"></div>
             <div class="candy-holder-btn candy-pick-expression fa-solid fa-palette" title="Pick the correct expression for this message"></div>
-            <div class="candy-holder-btn candy-open-settings fa-solid fa-gear" title="Manage Candy Expressions"></div>
         </div>
         <img id="candy-expression-image" alt="" draggable="false">
         <div class="candy-emoji-fallback" style="display:none;"></div>
@@ -1012,7 +1012,6 @@ function ensureHolder() {
     watchHolderResize(holder);
     clampHolderIntoView();
 
-    holder.querySelector('.candy-open-settings')?.addEventListener('click', openSettingsPanel);
     holder.querySelector('.candy-pick-expression')?.addEventListener('click', openExpressionPicker);
     holder.querySelector('.candy-pin-indicator')?.addEventListener('click', unpinCurrentExpression);
     // The whole frame is a drag handle; clicking the sprite (without moving)
@@ -1090,9 +1089,11 @@ function applyHolderChrome() {
     holder.classList.toggle('candy-chromeless', !!settings().chromeless);
     holder.classList.toggle('candy-hidden', !settings().showSpriteWindow);
 
-    // Fades the character sprite itself; the frame stays fully visible.
-    const alpha = Number(settings().spriteOpacity);
-    holder.style.setProperty('--candy-sprite-alpha', String(Number.isFinite(alpha) ? Math.min(1, Math.max(0.05, alpha)) : 1));
+    // Two independent layers: the sprite, and the panel behind it.
+    const sprite = Number(settings().spriteOpacity);
+    holder.style.setProperty('--candy-sprite-alpha', String(Number.isFinite(sprite) ? Math.min(1, Math.max(0.05, sprite)) : 1));
+    const frame = Number(settings().frameOpacity);
+    holder.style.setProperty('--candy-frame-alpha', String(Number.isFinite(frame) ? Math.min(1, Math.max(0, frame)) : 0));
 }
 
 /** Remember the size after the user drags the resize corner. */
@@ -1545,8 +1546,11 @@ const SETTINGS_HTML = `
                 <label class="candy-grow">Sprite opacity: <b><span id="candy-opacity-value"></span>%</b><br>
                     <input id="candy-opacity" type="range" min="10" max="100" step="5" style="width:100%">
                 </label>
+                <label class="candy-grow">Frame background: <b><span id="candy-frame-value"></span>%</b><br>
+                    <input id="candy-frame-opacity" type="range" min="0" max="100" step="5" style="width:100%">
+                </label>
             </div>
-            <small>Fades the character sprite itself. Drag anywhere on the window to move it, or its bottom-right corner to resize.</small>
+            <small><b>Sprite opacity</b> fades the character. <b>Frame background</b> is the panel behind it — keep it at 0% to read the chat straight through the window. Drag anywhere on the window to move it, or its bottom-right corner to resize.</small>
             <div class="candy-row candy-buttons">
                 <span class="menu_button candy-primary" id="candy-locate" title="Can't see the sprite window? This turns it on, moves it to the bottom-left and flashes it."><i class="fa-solid fa-crosshairs"></i> Find window</span>
                 <span class="menu_button" id="candy-reset-size" title="Clear a custom window size"><i class="fa-solid fa-compress"></i> Reset size</span>
@@ -1737,6 +1741,21 @@ function wireSettingsPanel() {
             const v = Number(opacity.value);
             settings().spriteOpacity = v / 100;
             if (opacityValue) opacityValue.textContent = String(v);
+            saveSettings();
+            applyHolderChrome();
+        });
+    }
+
+    const frameOpacity = $id('candy-frame-opacity');
+    const frameValue = $id('candy-frame-value');
+    if (frameOpacity) {
+        const pct = Math.round((s.frameOpacity ?? 0) * 100);
+        frameOpacity.value = String(pct);
+        if (frameValue) frameValue.textContent = String(pct);
+        frameOpacity.addEventListener('input', () => {
+            const v = Number(frameOpacity.value);
+            settings().frameOpacity = v / 100;
+            if (frameValue) frameValue.textContent = String(v);
             saveSettings();
             applyHolderChrome();
         });
@@ -2405,15 +2424,6 @@ async function refreshActiveSprites() {
     await loadSprites(character.name, variant, true);
     await renderSpriteGrid();
     renderCurrent();
-}
-
-function openSettingsPanel() {
-    const root = document.getElementById('candy-settings-root');
-    if (!root) return;
-    const content = root.querySelector('.inline-drawer-content');
-    const toggle = root.querySelector('.inline-drawer-toggle');
-    if (content && toggle && getComputedStyle(content).display === 'none') toggle.click();
-    root.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 /** Re-render the in-chat sprite for the current character/variant/emotion. */
