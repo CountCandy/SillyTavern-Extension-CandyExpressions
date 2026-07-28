@@ -69,16 +69,39 @@
     flex-direction: column;
     align-items: stretch;
     gap: 4px;
-    max-width: 45vw;
-    max-height: 75vh;
+    min-width: 120px;
+    min-height: 110px;
+    max-width: 95vw;
+    max-height: 95vh;
     padding: 5px;
+    border-radius: 12px;
+    border: 1px solid var(--candy-line);
+    user-select: none;
+    touch-action: none;
+    /* Drag the bottom-right corner to resize. */
+    resize: both;
+    overflow: hidden;
+    isolation: isolate;
+}
+
+/* The panel is a separate layer so its opacity can be lowered without
+   fading the sprite itself. */
+#candy-expression-holder::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
     border-radius: 12px;
     background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
     backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
-    border: 1px solid var(--candy-line);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    user-select: none;
-    touch-action: none;
+    opacity: var(--candy-bg-alpha, 1);
+    pointer-events: none;
+}
+
+#candy-expression-holder > * {
+    position: relative;
+    z-index: 1;
 }
 
 #candy-expression-holder.candy-hidden {
@@ -86,11 +109,12 @@
 }
 
 #candy-expression-holder.candy-chromeless {
-    background: transparent;
-    backdrop-filter: none;
-    box-shadow: none;
     border-color: transparent;
     padding: 0;
+}
+
+#candy-expression-holder.candy-chromeless::before {
+    display: none;
 }
 
 #candy-expression-holder.candy-chromeless .candy-holder-header {
@@ -142,11 +166,13 @@
 }
 
 #candy-expression-image {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
     max-width: 100%;
-    max-height: calc(75vh - 34px);
     object-fit: contain;
     border-radius: 8px;
-    pointer-events: none;
+    cursor: pointer; /* click to correct the expression */
 }
 
 #candy-expression-image[src=""],
@@ -543,6 +569,41 @@
 
 .candy-variant-option i {
     color: var(--candy-accent);
+}
+
+/* Expression picker rows */
+.candy-expression-picker {
+    max-height: 46vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.candy-expression-picker .candy-variant-option {
+    padding: 8px 12px;
+}
+
+.candy-variant-option.candy-no-sprite {
+    opacity: 0.62;
+}
+
+.candy-variant-option.candy-no-sprite i {
+    color: var(--grey50, #808080);
+}
+
+.candy-variant-option-name.candy-is-action {
+    color: var(--candy-action);
+    font-weight: 600;
+}
+
+.candy-unpin-row {
+    margin-bottom: 8px;
+    border-style: dashed;
+}
+
+/* Pin indicator on the sprite window */
+.candy-holder-header .candy-pin-indicator {
+    color: var(--candy-accent);
+    opacity: 0.95;
 }
 
 .candy-variant-option-name {

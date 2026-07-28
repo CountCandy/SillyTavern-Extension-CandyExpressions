@@ -116,6 +116,22 @@ Top K, Min P and repetition penalty are sent to text-completion backends (llama.
 
 **Max text sent** (default 1400 chars) trims very long messages before classifying — the first and last halves are kept with the middle elided, so a long "short story" message still classifies on its opening and its ending.
 
+### Remembered expressions
+
+Once a message has been classified, the chosen label is stored **on that message**. Reopen the chat, scroll away and back, or restart SillyTavern, and the sprite is restored **instantly with no API call**.
+
+It's per-swipe, too: SillyTavern keeps a copy of message data for each swipe, so swipe 1 can be `joy` and swipe 2 `anger`, and swiping between them shows each one's own expression — again without re-classifying.
+
+Turn it off with *Remember each message's expression* if you'd rather classify fresh every time.
+
+### Correcting a wrong guess
+
+Click the sprite (or the 🎨 button on the window) and pick the right expression. Your choice is **pinned** to that message: a 📌 appears on the window, and automatic classification will never overwrite it — not on re-render, not on `/candy-refresh`.
+
+The picker lists every label, marks which ones actually have a sprite in the current variant, and shows each label's description as a tooltip. To undo, click the 📌 (or choose *Unpin* at the top of the picker, or run `/candy-unpin`) — the message is re-classified normally from then on.
+
+`/candy-emote <label>` pins from a script or a quick reply.
+
 ### What gets sent, and when
 
 Classification reads **only the single most recent AI message**. Never your messages, never the chat history, never the character card.
@@ -190,8 +206,10 @@ In the **Expression Library** section:
 | Setting | What it does |
 |---|---|
 | Enable automatic classification | Master switch for per-message emotion classification. |
-| Show in-chat sprite window | Show/hide the floating sprite. Drag it by the grip; position is remembered. |
-| Chromeless window | Hide the sprite window's frame/background. |
+| Show in-chat sprite window | Show/hide the floating sprite. Drag it by the grip; position and size are remembered. |
+| Chromeless window | Hide the sprite window's frame/background entirely. |
+| Window background opacity | Fade the panel behind the sprite, 0–100%. The sprite itself stays fully opaque. |
+| Remember each message's expression | Store the label on the message and reuse it instead of re-classifying. |
 | Only offer labels that have a sprite | Restrict the classifier to labels that actually have a sprite in the active variant. |
 | Borrow a missing sprite from the default variant | If a variant lacks a sprite for the chosen label, fall back to the `default` variant. |
 | Show an emoji when no sprite is found | Last-resort emoji instead of a blank window. |
@@ -214,7 +232,8 @@ In the **Expression Library** section:
 | Command | Description |
 |---|---|
 | `/candy-variant [name]` | Get the current variant, or switch to `name` (sticky, saved per chat). |
-| `/candy-emote <label>` | Manually set the sprite right now (volatile — the next message may change it). |
+| `/candy-emote <label>` | Set **and pin** the expression for the current message. |
+| `/candy-unpin` | Remove the pin from the current message and re-classify it. |
 | `/candy-classify [text]` | Classify `text` (or the last character message) and set the sprite. Returns the label. |
 | `/candy-log` | Open the classification log (exact prompt sent + raw reply). |
 | `/candy-find` | Can't see the sprite window? Reset it to the bottom-left and flash it. |

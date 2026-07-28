@@ -32,6 +32,7 @@ function getContext() {
 const MODULE_NAME = 'CandyExpressions';
 const EXTENSION_KEY = 'candyExpressions'; // key in extension_settings
 const METADATA_KEY = 'candyExpressions';  // key in chat_metadata (per-chat, sticky variant)
+const MESSAGE_KEY = 'candyExpression';    // key in message.extra (remembered label per message)
 
 const DEFAULT_VARIANT = 'default';
 
@@ -174,7 +175,9 @@ const DEFAULT_SETTINGS = {
     showEmojiFallback: false,    // show an emoji when no sprite is found
     showSpriteWindow: true,      // show the in-chat sprite holder
     chromeless: false,           // hide the holder background/frame
-    holder: { x: null, y: null }, // saved holder position (px from left/top)
+    backgroundOpacity: 1,        // 0 = fully transparent panel, 1 = solid (sprite is never faded)
+    holder: { x: null, y: null, w: null, h: null }, // saved holder position and size
+    rememberLabels: true,        // store the chosen label on the message and reuse it
     // label library (shared across characters)
     emotions: DEFAULT_EMOTIONS,
     actions: DEFAULT_ACTIONS,
@@ -346,6 +349,73 @@ function setCurrentVariant(variant) {
     if (!c.chatMetadata[METADATA_KEY]) c.chatMetadata[METADATA_KEY] = {};
     c.chatMetadata[METADATA_KEY].variant = variant;
     c.saveMetadataDebounced();
+}
+
+// ------------------------------------------------------------------ //
+// Remembered labels (per message, per swipe)
+// ------------------------------------------------------------------ //
+/*
+ * The chosen label is stored on the message itself, in message.extra. SillyTavern
+ * copies extra into swipe_info[swipe_id].extra and restores it when you swipe,
+ * so each swipe remembers its own expression for free.
+ *
+ * record = { label: string, manual: boolean, ts: number }
+ *   manual: true  -> you picked it; automatic classification must never overwrite it
+ *   manual: false -> the classifier picked it; reused instead of re-classifying
+ */
+
+let saveChatTimer = null;
+function saveChatDebounced() {
+    clearTimeout(saveChatTimer);
+    saveChatTimer = setTimeout(() => {
+        try {
+            getContext().saveChat?.();
+        } catch (err) {
+            console.warn(`[${MODULE_NAME}] Could not save chat`, err);
+        }
+    }, 1200);
+}
+
+/** @returns {{label: string, manual: boolean, ts: number}|null} */
+function getMessageRecord(index) {
+    if (!settings().rememberLabels) return null;
+    const m = getContext().chat?.[index];
+    const rec = m?.extra?.[MESSAGE_KEY];
+    return rec && typeof rec.label === 'string' ? rec : null;
+}
+
+function setMessageRecord(index, record) {
+    if (!settings().rememberLabels) return;
+    const m = getContext().chat?.[index];
+    if (!m) return;
+    if (!m.extra || typeof m.extra !== 'object') m.extra = {};
+    m.extra[MESSAGE_KEY] = record;
+
+    // Mirror into the current swipe so swiping away and back restores it.
+    const sid = m.swipe_id;
+    if (Array.isArray(m.swipe_info) && Number.isInteger(sid) && m.swipe_info[sid]) {
+        const info = m.swipe_info[sid];
+        if (!info.extra || typeof info.extra !== 'object') info.extra = {};
+        info.extra[MESSAGE_KEY] = record;
+    }
+    saveChatDebounced();
+}
+
+function clearMessageRecord(index) {
+    const m = getContext().chat?.[index];
+    if (!m?.extra) return;
+    delete m.extra[MESSAGE_KEY];
+    const sid = m.swipe_id;
+    if (Array.isArray(m.swipe_info) && Number.isInteger(sid) && m.swipe_info[sid]?.extra) {
+        delete m.swipe_info[sid].extra[MESSAGE_KEY];
+    }
+    saveChatDebounced();
+}
+
+/** The remembered record for the message currently being displayed, if any. */
+function currentMessageRecord() {
+    const last = getLastCharacterMessage();
+    return last ? getMessageRecord(last.index) : null;
 }
 
 // ------------------------------------------------------------------ //
@@ -858,7 +928,7 @@ async function showClassificationLog() {
 }
 
 /** Classify the latest character message (deduped, serialized). */
-async function classifyLatest(force = false) {
+async function classifyLatest({ force = false, ignoreMemory = false } = {}) {
     if (!settings().enabled) return;
     if (state.classifyBusy) { state.classifyQueued = true; return; }
 
@@ -868,11 +938,29 @@ async function classifyLatest(force = false) {
             state.classifyQueued = false;
             const fresh = getLastCharacterMessage();
             if (!fresh || !fresh.mes) break;
-            const key = `${getCurrentVariant()} ${fresh.mes}`;
-            if (!force && key === state.lastKey) break; // already classified this exact state
+
+            const character = getActiveCharacter();
+            const variant = getCurrentVariant();
+            const key = `${variant} ${fresh.mes}`;
+
+            // Already decided for this message? Show it instantly - no API call.
+            // A manual pick always wins, even when the caller asked to re-classify.
+            const rec = getMessageRecord(fresh.index);
+            if (rec && (rec.manual || !ignoreMemory)) {
+                state.lastKey = key;
+                state.lastEmotion = rec.label;
+                if (character) await renderSprite(character.name, variant, rec.label);
+                updatePinIndicator();
+                break;
+            }
+
+            if (!force && key === state.lastKey) break; // nothing changed
             force = false;
             state.lastKey = key;
-            await classifyText(fresh.mes);
+
+            const label = await classifyText(fresh.mes);
+            if (label) setMessageRecord(fresh.index, { label, manual: false, ts: Date.now() });
+            updatePinIndicator();
         } while (state.classifyQueued);
     } finally {
         state.classifyBusy = false;
@@ -892,6 +980,8 @@ function ensureHolder() {
         <div class="candy-holder-header">
             <div class="candy-drag-grabber fa-solid fa-grip" title="Drag to move"></div>
             <span class="candy-variant-name" title="Current variant (change it from the toolbar button)"></span>
+            <div class="candy-holder-btn candy-pin-indicator fa-solid fa-thumbtack" title="Pinned by you - click to unpin and let the classifier decide again" style="display:none;"></div>
+            <div class="candy-holder-btn candy-pick-expression fa-solid fa-palette" title="Pick the correct expression for this message"></div>
             <div class="candy-holder-btn candy-open-settings fa-solid fa-gear" title="Manage Candy Expressions"></div>
         </div>
         <img id="candy-expression-image" alt="" draggable="false">
@@ -906,9 +996,19 @@ function ensureHolder() {
         holder.style.top = `${pos.y}px`;
         holder.style.bottom = 'auto';
     }
+    // restore saved size (set by dragging the resize corner)
+    if (pos && Number.isFinite(pos.w) && Number.isFinite(pos.h) && pos.w > 0 && pos.h > 0) {
+        holder.style.width = `${pos.w}px`;
+        holder.style.height = `${pos.h}px`;
+    }
+    watchHolderResize(holder);
     clampHolderIntoView();
 
     holder.querySelector('.candy-open-settings')?.addEventListener('click', openSettingsPanel);
+    holder.querySelector('.candy-pick-expression')?.addEventListener('click', openExpressionPicker);
+    holder.querySelector('.candy-pin-indicator')?.addEventListener('click', unpinCurrentExpression);
+    // Clicking the sprite itself is the quickest way to correct a wrong guess.
+    holder.querySelector('#candy-expression-image')?.addEventListener('click', openExpressionPicker);
     const grabber = holder.querySelector('.candy-drag-grabber');
     if (grabber) makeDraggable(holder, grabber);
     applyHolderChrome();
@@ -940,12 +1040,21 @@ function clampHolderIntoView() {
 
 /** Put the window back at its default spot, make sure it's on, and flash it. */
 function locateHolder() {
-    settings().showSpriteWindow = true;
-    settings().holder = { x: null, y: null };
+    const s = settings();
+    s.showSpriteWindow = true;
+    // Clear any saved position AND size - a tiny saved size hides it just as
+    // effectively as an off-screen position.
+    s.holder = { x: null, y: null, w: null, h: null };
+    // Don't make someone hunt for a panel they made invisible.
+    if (!(s.backgroundOpacity > 0.15)) s.backgroundOpacity = 1;
     saveSettings();
 
     const showBox = document.getElementById('candy-show-window');
     if (showBox) showBox.checked = true;
+    const opacity = document.getElementById('candy-opacity');
+    const opacityValue = document.getElementById('candy-opacity-value');
+    if (opacity) opacity.value = String(Math.round(s.backgroundOpacity * 100));
+    if (opacityValue) opacityValue.textContent = String(Math.round(s.backgroundOpacity * 100));
 
     ensureHolder();
     const holder = document.getElementById('candy-expression-holder');
@@ -955,6 +1064,8 @@ function locateHolder() {
     holder.style.left = '12px';
     holder.style.top = 'auto';
     holder.style.bottom = '68px';
+    holder.style.width = '';
+    holder.style.height = '';
     applyHolderChrome();
     renderCurrent();
 
@@ -971,6 +1082,31 @@ function applyHolderChrome() {
     if (!holder) return;
     holder.classList.toggle('candy-chromeless', !!settings().chromeless);
     holder.classList.toggle('candy-hidden', !settings().showSpriteWindow);
+
+    // Panel transparency. Drives the ::before layer only, so the sprite stays crisp.
+    const alpha = Number(settings().backgroundOpacity);
+    holder.style.setProperty('--candy-bg-alpha', String(Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 1));
+}
+
+/** Remember the size after the user drags the resize corner. */
+let resizeSaveTimer = null;
+function watchHolderResize(holder) {
+    if (typeof ResizeObserver !== 'function' || holder._candyResizeWatched) return;
+    holder._candyResizeWatched = true;
+    const ro = new ResizeObserver(() => {
+        clearTimeout(resizeSaveTimer);
+        resizeSaveTimer = setTimeout(() => {
+            // Only persist an explicit size (inline styles set by the resize handle).
+            const w = parseInt(holder.style.width, 10);
+            const h = parseInt(holder.style.height, 10);
+            if (!Number.isFinite(w) || !Number.isFinite(h)) return;
+            const pos = settings().holder || {};
+            if (pos.w === w && pos.h === h) return;
+            settings().holder = { ...pos, w, h };
+            saveSettings();
+        }, 500);
+    });
+    ro.observe(holder);
 }
 
 function makeDraggable(holder, handle) {
@@ -1090,6 +1226,123 @@ function clearSprite() {
 // ------------------------------------------------------------------ //
 // In-chat variant selector (on the holder) + wand-menu quick switch
 // ------------------------------------------------------------------ //
+// ------------------------------------------------------------------ //
+// Manual correction: pin the right expression to this message
+// ------------------------------------------------------------------ //
+/** Show the pin icon when the displayed message has a manual pick. */
+function updatePinIndicator() {
+    const pin = document.querySelector('#candy-expression-holder .candy-pin-indicator');
+    if (!pin) return;
+    const rec = currentMessageRecord();
+    pin.style.display = rec?.manual ? '' : 'none';
+}
+
+/** Pin a label to the message currently on screen. */
+async function pinExpression(label) {
+    const character = getActiveCharacter();
+    const last = getLastCharacterMessage();
+    if (!character || !last) return;
+
+    setMessageRecord(last.index, { label, manual: true, ts: Date.now() });
+    state.lastEmotion = label;
+    state.lastKey = `${getCurrentVariant()} ${last.mes}`;
+    const file = await renderSprite(character.name, getCurrentVariant(), label);
+    updatePinIndicator();
+
+    if (!file) {
+        toastr?.warning(`Pinned "${label}", but there is no sprite for it in "${getCurrentVariant()}".`, 'Candy Expressions');
+    } else {
+        toastr?.success(`Pinned "${label}" to this message.`, 'Candy Expressions', { timeOut: 1800 });
+    }
+}
+
+/** Drop the manual pick and let the classifier decide again. */
+async function unpinCurrentExpression() {
+    const last = getLastCharacterMessage();
+    if (!last) return;
+    const rec = getMessageRecord(last.index);
+    if (!rec?.manual) return;
+
+    clearMessageRecord(last.index);
+    updatePinIndicator();
+    state.lastKey = null;
+    toastr?.info('Unpinned — re-classifying this message.', 'Candy Expressions', { timeOut: 1800 });
+    triggerClassify({ force: true, ignoreMemory: true });
+}
+
+/** Big-target list of every label, marking which ones have a sprite here. */
+async function openExpressionPicker() {
+    const c = getContext();
+    const character = getActiveCharacter();
+    if (!character) {
+        toastr?.warning('Open a character chat first.', 'Candy Expressions');
+        return;
+    }
+    const variant = getCurrentVariant();
+    const sprites = await loadSprites(character.name, variant);
+    const available = new Set(sprites.map(s => s.label));
+    const current = state.lastEmotion;
+    const rec = currentMessageRecord();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'candy-popup-block';
+    const title = document.createElement('h3');
+    title.textContent = 'Set expression for this message';
+    const hint = document.createElement('p');
+    hint.className = 'candy-hint';
+    hint.textContent = rec?.manual
+        ? 'This message is pinned. Choosing another label re-pins it.'
+        : 'Your choice is pinned to this message and will not be overwritten by the classifier.';
+    wrap.append(title, hint);
+
+    /** @type {any} */
+    let popup;
+
+    if (rec?.manual) {
+        const unpin = document.createElement('div');
+        unpin.className = 'candy-variant-option candy-unpin-row';
+        unpin.tabIndex = 0;
+        unpin.innerHTML = '<i class="fa-solid fa-rotate-left"></i><span class="candy-variant-option-name">Unpin — let the classifier decide</span>';
+        const doUnpin = async () => { popup?.completeAffirmative?.(); await unpinCurrentExpression(); };
+        unpin.addEventListener('click', doUnpin);
+        unpin.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doUnpin(); } });
+        wrap.append(unpin);
+    }
+
+    const list = document.createElement('div');
+    list.className = 'candy-variant-picker candy-expression-picker';
+    wrap.append(list);
+
+    for (const entry of libraryEntries()) {
+        const has = available.has(entry.label);
+        const row = document.createElement('div');
+        row.className = 'candy-variant-option' + (entry.label === current ? ' candy-active' : '') + (has ? '' : ' candy-no-sprite');
+        row.tabIndex = 0;
+        row.title = entry.description || entry.label;
+
+        const icon = document.createElement('i');
+        icon.className = has ? 'fa-solid fa-image' : 'fa-regular fa-image';
+        const name = document.createElement('span');
+        name.className = 'candy-variant-option-name' + (entry.isAction ? ' candy-is-action' : '');
+        name.textContent = entry.label;
+        row.append(icon, name);
+        if (!has) {
+            const badge = document.createElement('span');
+            badge.className = 'candy-badge candy-badge-muted';
+            badge.textContent = 'no sprite';
+            row.append(badge);
+        }
+
+        const choose = async () => { popup?.completeAffirmative?.(); await pinExpression(entry.label); };
+        row.addEventListener('click', choose);
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+        list.append(row);
+    }
+
+    popup = new c.Popup(wrap, c.POPUP_TYPE.TEXT, '', { okButton: 'Cancel', allowVerticalScrolling: true });
+    await popup.show();
+}
+
 /** Reflect the current variant on the sprite window and the toolbar button. */
 function updateHolderVariantSelect() {
     const current = getCurrentVariant();
@@ -1235,6 +1488,16 @@ const SETTINGS_HTML = `
             <label class="checkbox_label" for="candy-filter-available"><input type="checkbox" id="candy-filter-available"><span>Only offer labels that have a sprite in the active variant</span></label>
             <label class="checkbox_label" for="candy-cross-fallback"><input type="checkbox" id="candy-cross-fallback"><span>Borrow a missing sprite from the default variant</span></label>
             <label class="checkbox_label" for="candy-emoji-fallback"><input type="checkbox" id="candy-emoji-fallback"><span>Show an emoji when no sprite is found</span></label>
+            <label class="checkbox_label" for="candy-remember" title="Stores the chosen label on the message, so reopening a chat or swiping back restores the sprite instantly without another API call."><input type="checkbox" id="candy-remember"><span>Remember each message's expression</span></label>
+            <div class="candy-row nowrap">
+                <label class="candy-grow">Window background opacity: <b><span id="candy-opacity-value"></span>%</b><br>
+                    <input id="candy-opacity" type="range" min="0" max="100" step="5" style="width:100%">
+                </label>
+            </div>
+            <small>The sprite itself stays fully opaque — only the panel behind it fades. Drag the window's bottom-right corner to resize it.</small>
+            <div class="candy-row">
+                <span class="menu_button" id="candy-reset-size"><i class="fa-solid fa-compress"></i> Reset window size</span>
+            </div>
             <div class="candy-row">
                 <span class="menu_button candy-primary" id="candy-locate" title="Can't see the sprite window? This turns it on, moves it to the bottom-left and flashes it."><i class="fa-solid fa-crosshairs"></i> Find sprite window</span>
             </div>
@@ -1414,6 +1677,31 @@ function wireSettingsPanel() {
 
     $id('candy-test')?.addEventListener('click', testClassifier);
     $id('candy-locate')?.addEventListener('click', locateHolder);
+    bindCheckbox('candy-remember', 'rememberLabels');
+
+    const opacity = $id('candy-opacity');
+    const opacityValue = $id('candy-opacity-value');
+    if (opacity) {
+        const pct = Math.round((s.backgroundOpacity ?? 1) * 100);
+        opacity.value = String(pct);
+        if (opacityValue) opacityValue.textContent = String(pct);
+        opacity.addEventListener('input', () => {
+            const v = Number(opacity.value);
+            settings().backgroundOpacity = v / 100;
+            if (opacityValue) opacityValue.textContent = String(v);
+            saveSettings();
+            applyHolderChrome();
+        });
+    }
+
+    $id('candy-reset-size')?.addEventListener('click', () => {
+        const holder = document.getElementById('candy-expression-holder');
+        if (holder) { holder.style.width = ''; holder.style.height = ''; }
+        const pos = settings().holder || {};
+        settings().holder = { ...pos, w: null, h: null };
+        saveSettings();
+        toastr?.info('Window size reset.', 'Candy Expressions', { timeOut: 1500 });
+    });
     bindText('candy-think-prefix', 'thinkPrefix');
     bindText('candy-think-suffix', 'thinkSuffix');
 
@@ -2091,9 +2379,10 @@ function renderCurrent() {
 // Event wiring
 // ------------------------------------------------------------------ //
 let triggerTimer = null;
-function triggerClassify(force = false) {
+function triggerClassify(opts = {}) {
+    const options = typeof opts === 'boolean' ? { force: opts } : opts;
     clearTimeout(triggerTimer);
-    triggerTimer = setTimeout(() => classifyLatest(force).catch(e => console.error(`[${MODULE_NAME}]`, e)), 250);
+    triggerTimer = setTimeout(() => classifyLatest(options).catch(e => console.error(`[${MODULE_NAME}]`, e)), 250);
 }
 
 async function onChatChanged() {
@@ -2101,10 +2390,12 @@ async function onChatChanged() {
     state.lastEmotion = null;
     clearSprite();
     updateHolderVariantSelect();
+    updatePinIndicator();
     refreshSettingsCharContext();
     const character = getActiveCharacter();
     if (character) await loadSprites(character.name, getCurrentVariant(), true);
-    triggerClassify(true);
+    // Any remembered label is restored here without an API call.
+    triggerClassify({ force: true });
 }
 
 function wireEvents() {
@@ -2185,7 +2476,7 @@ function registerSlashCommands() {
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'candy-emote',
-        helpString: 'Manually set the Candy Expressions sprite (label) right now (volatile).',
+        helpString: 'Set the expression for the current message and pin it, so the classifier will not overwrite it.',
         returns: 'the label that was set',
         unnamedArgumentList: [SlashCommandArgument.fromProps({
             description: 'expression/action label',
@@ -2197,10 +2488,15 @@ function registerSlashCommands() {
             const label = sanitizeLabelName(value);
             const character = getActiveCharacter();
             if (!character || !label) return '';
-            state.lastEmotion = label;
-            await renderSprite(character.name, getCurrentVariant(), label);
+            await pinExpression(label);
             return label;
         },
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'candy-unpin',
+        helpString: 'Remove the pinned expression from the current message and re-classify it.',
+        callback: async () => { await unpinCurrentExpression(); return ''; },
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -2238,7 +2534,7 @@ function registerSlashCommands() {
             const character = getActiveCharacter();
             if (character) await loadSprites(character.name, getCurrentVariant(), true);
             await renderSpriteGrid();
-            triggerClassify(true);
+            triggerClassify({ force: true, ignoreMemory: true });
             return '';
         },
     }));
