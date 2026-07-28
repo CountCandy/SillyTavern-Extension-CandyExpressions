@@ -850,20 +850,75 @@ function ensureHolder() {
             <div class="candy-holder-btn candy-open-settings fa-solid fa-gear" title="Manage Candy Expressions"></div>
         </div>
         <img id="candy-expression-image" alt="" draggable="false">
-        <div class="candy-emoji-fallback" style="display:none;"></div>`;
+        <div class="candy-emoji-fallback" style="display:none;"></div>
+        <div class="candy-empty-note" style="display:none;">No sprite yet<br><span style="opacity:.7">Candy Expressions</span></div>`;
     document.body.appendChild(holder);
 
-    // restore saved position
+    // restore saved position, clamped so an off-screen value can't hide it
     const pos = settings().holder;
     if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
         holder.style.left = `${pos.x}px`;
         holder.style.top = `${pos.y}px`;
         holder.style.bottom = 'auto';
     }
+    clampHolderIntoView();
 
-    holder.querySelector('.candy-open-settings').addEventListener('click', openSettingsPanel);
-    makeDraggable(holder, holder.querySelector('.candy-drag-grabber'));
+    holder.querySelector('.candy-open-settings')?.addEventListener('click', openSettingsPanel);
+    const grabber = holder.querySelector('.candy-drag-grabber');
+    if (grabber) makeDraggable(holder, grabber);
     applyHolderChrome();
+}
+
+/** Keep the window inside the viewport (e.g. after a resize, or a bad saved position). */
+function clampHolderIntoView() {
+    const holder = document.getElementById('candy-expression-holder');
+    if (!holder || holder.classList.contains('candy-hidden')) return;
+
+    const rect = holder.getBoundingClientRect();
+    if (!rect.width && !rect.height) return; // not laid out yet
+
+    const MARGIN = 24; // keep at least this much of it reachable
+    const maxLeft = Math.max(0, window.innerWidth - MARGIN);
+    const maxTop = Math.max(0, window.innerHeight - MARGIN);
+    const offscreen = rect.left > maxLeft || rect.top > maxTop || rect.right < MARGIN || rect.bottom < MARGIN;
+    if (!offscreen) return;
+
+    const x = Math.min(Math.max(0, rect.left), Math.max(0, window.innerWidth - Math.min(rect.width, 200)));
+    const y = Math.min(Math.max(0, rect.top), Math.max(0, window.innerHeight - Math.min(rect.height, 200)));
+    holder.style.left = `${x}px`;
+    holder.style.top = `${y}px`;
+    holder.style.bottom = 'auto';
+    settings().holder = { x: Math.round(x), y: Math.round(y) };
+    saveSettings();
+    console.warn(`[${MODULE_NAME}] Sprite window was off-screen; moved it back into view.`);
+}
+
+/** Put the window back at its default spot, make sure it's on, and flash it. */
+function locateHolder() {
+    settings().showSpriteWindow = true;
+    settings().holder = { x: null, y: null };
+    saveSettings();
+
+    const showBox = document.getElementById('candy-show-window');
+    if (showBox) showBox.checked = true;
+
+    ensureHolder();
+    const holder = document.getElementById('candy-expression-holder');
+    if (!holder) return;
+
+    holder.classList.remove('candy-hidden');
+    holder.style.left = '12px';
+    holder.style.top = 'auto';
+    holder.style.bottom = '68px';
+    applyHolderChrome();
+    renderCurrent();
+
+    holder.classList.remove('candy-locating');
+    void holder.offsetWidth; // restart the animation
+    holder.classList.add('candy-locating');
+    setTimeout(() => holder.classList.remove('candy-locating'), 2800);
+
+    toastr?.info('Sprite window reset to the bottom-left and highlighted.', 'Candy Expressions', { timeOut: 4000 });
 }
 
 function applyHolderChrome() {
@@ -933,31 +988,58 @@ async function renderSprite(charName, variant, label) {
 
     const img = document.getElementById('candy-expression-image');
     const emoji = document.querySelector('#candy-expression-holder .candy-emoji-fallback');
+    const note = document.querySelector('#candy-expression-holder .candy-empty-note');
     if (!img) return null;
 
     const file = await resolveSprite(charName, variant, label);
     if (file) {
+        // Report a broken/404 sprite instead of showing an empty window.
+        img.onerror = () => {
+            img.onerror = null;
+            console.error(`[${MODULE_NAME}] Sprite failed to load: ${file.url}`);
+            img.style.display = 'none';
+            if (note) {
+                note.innerHTML = 'Sprite failed to load<br><span style="opacity:.7">see console</span>';
+                note.style.display = '';
+            }
+            toastr?.error(`Could not load sprite file: ${file.fileName}`, 'Candy Expressions', { timeOut: 8000 });
+        };
+        img.onload = () => { if (note) note.style.display = 'none'; };
         img.src = file.url;
         img.style.display = '';
-        img.title = label;
+        img.title = `${label} (${file.fileName})`;
         if (emoji) emoji.style.display = 'none';
+        if (note) note.style.display = 'none';
     } else if (settings().showEmojiFallback && EMOJI_FALLBACK[label]) {
+        img.onerror = null;
         img.removeAttribute('src');
         img.style.display = 'none';
+        if (note) note.style.display = 'none';
         if (emoji) { emoji.textContent = EMOJI_FALLBACK[label]; emoji.style.display = ''; }
     } else {
+        // Nothing to show: keep a small visible placeholder so the window can
+        // still be found and moved, rather than collapsing to an invisible box.
+        img.onerror = null;
         img.removeAttribute('src');
         img.style.display = 'none';
         if (emoji) emoji.style.display = 'none';
+        if (note) {
+            note.innerHTML = `No sprite for "${escapeHtml(label)}"<br><span style="opacity:.7">in variant "${escapeHtml(variant)}"</span>`;
+            note.style.display = '';
+        }
     }
+
+    clampHolderIntoView();
     return file;
 }
 
 function clearSprite() {
     const img = document.getElementById('candy-expression-image');
     const emoji = document.querySelector('#candy-expression-holder .candy-emoji-fallback');
-    if (img) { img.removeAttribute('src'); img.style.display = 'none'; }
+    const note = document.querySelector('#candy-expression-holder .candy-empty-note');
+    if (img) { img.onerror = null; img.removeAttribute('src'); img.style.display = 'none'; }
     if (emoji) emoji.style.display = 'none';
+    if (note) note.style.display = 'none';
 }
 
 // ------------------------------------------------------------------ //
@@ -1108,6 +1190,10 @@ const SETTINGS_HTML = `
             <label class="checkbox_label" for="candy-filter-available"><input type="checkbox" id="candy-filter-available"><span>Only offer labels that have a sprite in the active variant</span></label>
             <label class="checkbox_label" for="candy-cross-fallback"><input type="checkbox" id="candy-cross-fallback"><span>Borrow a missing sprite from the default variant</span></label>
             <label class="checkbox_label" for="candy-emoji-fallback"><input type="checkbox" id="candy-emoji-fallback"><span>Show an emoji when no sprite is found</span></label>
+            <div class="candy-row">
+                <span class="menu_button candy-primary" id="candy-locate" title="Can't see the sprite window? This turns it on, moves it to the bottom-left and flashes it."><i class="fa-solid fa-crosshairs"></i> Find sprite window</span>
+            </div>
+            <div id="candy-status" class="candy-status"></div>
 
             <div class="candy-section">
                 <div class="candy-section-title"><span>Classifier</span></div>
@@ -1275,6 +1361,7 @@ function wireSettingsPanel() {
     }
 
     $id('candy-test')?.addEventListener('click', testClassifier);
+    $id('candy-locate')?.addEventListener('click', locateHolder);
     bindText('candy-think-prefix', 'thinkPrefix');
     bindText('candy-think-suffix', 'thinkSuffix');
 
@@ -1310,6 +1397,45 @@ function wireSettingsPanel() {
     $id('candy-zip-input')?.addEventListener('change', onZipChosen);
 
     renderLabelList();
+    updateStatusLine();
+    // Refresh the status line while the settings panel is open.
+    setInterval(() => {
+        const root = document.getElementById('candy-settings-root');
+        const content = root?.querySelector('.inline-drawer-content');
+        if (content && getComputedStyle(content).display !== 'none') updateStatusLine();
+    }, 1500);
+}
+
+/** Live one-line status: is the window on screen, and what is it showing? */
+function updateStatusLine() {
+    const el = document.getElementById('candy-status');
+    if (!el) return;
+
+    const bits = [];
+    const character = getActiveCharacter();
+    bits.push(character ? `Character: <b>${escapeHtml(character.name)}</b>` : '<b>No character chat open</b>');
+    if (character) bits.push(`Variant: <b>${escapeHtml(getCurrentVariant())}</b>`);
+
+    if (!settings().showSpriteWindow) {
+        bits.push('Window: <b>hidden</b> (enable it above)');
+    } else {
+        const holder = document.getElementById('candy-expression-holder');
+        if (!holder) {
+            bits.push('Window: <b>not created yet</b>');
+        } else {
+            const r = holder.getBoundingClientRect();
+            const onScreen = r.right > 0 && r.bottom > 0 && r.left < window.innerWidth && r.top < window.innerHeight;
+            bits.push(`Window: <b>${onScreen ? 'on screen' : 'OFF SCREEN'}</b> at ${Math.round(r.left)},${Math.round(r.top)}`);
+        }
+        const img = document.getElementById('candy-expression-image');
+        const src = img?.getAttribute('src');
+        bits.push(src
+            ? `Showing: <tt>${escapeHtml(decodeURIComponent(src.split('/').pop().split('?')[0]))}</tt>`
+            : 'Showing: <b>nothing</b>');
+    }
+    if (state.lastEmotion) bits.push(`Last label: <b>${escapeHtml(state.lastEmotion)}</b>`);
+
+    el.innerHTML = bits.join(' &nbsp;·&nbsp; ');
 }
 
 /** Sampler fields: id -> key in settings().sampler. Blank input = don't override. */
@@ -2011,6 +2137,12 @@ function registerSlashCommands() {
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'candy-find',
+        helpString: 'Reset the Candy Expressions sprite window to the bottom-left, make it visible, and flash it.',
+        callback: async () => { locateHolder(); return ''; },
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'candy-log',
         helpString: 'Show the Candy Expressions classification log: the exact prompt sent to the classifier and the raw reply.',
         callback: async () => { await showClassificationLog(); return ''; },
@@ -2045,6 +2177,8 @@ jQuery(async () => {
         wireEvents();
 
         updateHolderVariantSelect();
+        window.addEventListener('resize', clampHolderIntoView);
+
         const character = getActiveCharacter();
         if (character) {
             await loadSprites(character.name, getCurrentVariant(), true);

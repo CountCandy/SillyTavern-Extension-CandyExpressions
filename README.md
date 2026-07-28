@@ -205,11 +205,16 @@ In the **Expression Library** section:
 | `/candy-emote <label>` | Manually set the sprite right now (volatile — the next message may change it). |
 | `/candy-classify [text]` | Classify `text` (or the last character message) and set the sprite. Returns the label. |
 | `/candy-log` | Open the classification log (exact prompt sent + raw reply). |
+| `/candy-find` | Can't see the sprite window? Reset it to the bottom-left and flash it. |
 | `/candy-refresh` | Reload sprites and re-classify the last message. |
 
 ---
 
 ## Troubleshooting
+
+**I can't find the sprite window.** Click **Find sprite window** in the settings (or run `/candy-find`). It turns the window on, moves it to the bottom-left, and flashes it with a pink outline. The **status line** just under it always tells you whether the window is on screen, where it is, and which file it's showing.
+
+The window is a floating panel — it is *not* docked in the chat. By default it sits above the message input on the left. You can drag it by the grip handle; its position is remembered, and if it ever ends up off-screen (or you shrink the browser window) it's automatically pulled back into view.
 
 **A label is chosen but no sprite appears.** That's the most common cause of "nothing happens": the classification worked, but that variant has no image for the chosen label. The log marks these entries **NO SPRITE**, and you get a toast (once per label per variant). Fix it by uploading `<label>.png` to that variant, turning on *Borrow a missing sprite from the default variant*, or enabling the emoji fallback. **Test classifier** tells you which of the two happened in one click.
 
