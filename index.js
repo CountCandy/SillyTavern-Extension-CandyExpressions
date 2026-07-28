@@ -128,7 +128,7 @@ const EMOJI_FALLBACK = {
     surprise: '😲', neutral: '😐',
 };
 
-const SETTINGS_VERSION = 4;
+const SETTINGS_VERSION = 5;
 
 /**
  * Sampler presets for classification. Classification wants consistency, not
@@ -175,7 +175,7 @@ const DEFAULT_SETTINGS = {
     showEmojiFallback: false,    // show an emoji when no sprite is found
     showSpriteWindow: true,      // show the in-chat sprite holder
     chromeless: false,           // hide the holder background/frame
-    backgroundOpacity: 1,        // 0 = fully transparent panel, 1 = solid (sprite is never faded)
+    spriteOpacity: 1,            // fades the character sprite itself (0.1 - 1)
     holder: { x: null, y: null, w: null, h: null }, // saved holder position and size
     rememberLabels: true,        // store the chosen label on the message and reuse it
     // label library (shared across characters)
@@ -258,6 +258,14 @@ function migrateSettings() {
         }
         if (filled) console.log(`[${MODULE_NAME}] Added definitions for ${filled} built-in expression(s).`);
         s.version = 4;
+    }
+
+    // v4 -> v5: the opacity slider now fades the sprite rather than the panel
+    // behind it, so the old value doesn't carry over meaningfully.
+    if ((s.version ?? 4) < 5) {
+        delete s.backgroundOpacity;
+        s.spriteOpacity = 1;
+        s.version = 5;
     }
 
     // Fill in any sampler keys added after the user's settings were written.
@@ -978,7 +986,7 @@ function ensureHolder() {
     // dropdown floating over the chat was too easy to hit by accident.
     holder.innerHTML = `
         <div class="candy-holder-header">
-            <div class="candy-drag-grabber fa-solid fa-grip" title="Drag to move"></div>
+            <div class="candy-drag-grabber fa-solid fa-grip" title="Drag anywhere on this window to move it"></div>
             <span class="candy-variant-name" title="Current variant (change it from the toolbar button)"></span>
             <div class="candy-holder-btn candy-pin-indicator fa-solid fa-thumbtack" title="Pinned by you - click to unpin and let the classifier decide again" style="display:none;"></div>
             <div class="candy-holder-btn candy-pick-expression fa-solid fa-palette" title="Pick the correct expression for this message"></div>
@@ -1007,10 +1015,9 @@ function ensureHolder() {
     holder.querySelector('.candy-open-settings')?.addEventListener('click', openSettingsPanel);
     holder.querySelector('.candy-pick-expression')?.addEventListener('click', openExpressionPicker);
     holder.querySelector('.candy-pin-indicator')?.addEventListener('click', unpinCurrentExpression);
-    // Clicking the sprite itself is the quickest way to correct a wrong guess.
-    holder.querySelector('#candy-expression-image')?.addEventListener('click', openExpressionPicker);
-    const grabber = holder.querySelector('.candy-drag-grabber');
-    if (grabber) makeDraggable(holder, grabber);
+    // The whole frame is a drag handle; clicking the sprite (without moving)
+    // opens the expression picker - see makeDraggable.
+    makeDraggable(holder);
     applyHolderChrome();
 }
 
@@ -1045,16 +1052,16 @@ function locateHolder() {
     // Clear any saved position AND size - a tiny saved size hides it just as
     // effectively as an off-screen position.
     s.holder = { x: null, y: null, w: null, h: null };
-    // Don't make someone hunt for a panel they made invisible.
-    if (!(s.backgroundOpacity > 0.15)) s.backgroundOpacity = 1;
+    // Don't make someone hunt for a sprite they faded to nothing.
+    if (!(s.spriteOpacity > 0.15)) s.spriteOpacity = 1;
     saveSettings();
 
     const showBox = document.getElementById('candy-show-window');
     if (showBox) showBox.checked = true;
     const opacity = document.getElementById('candy-opacity');
     const opacityValue = document.getElementById('candy-opacity-value');
-    if (opacity) opacity.value = String(Math.round(s.backgroundOpacity * 100));
-    if (opacityValue) opacityValue.textContent = String(Math.round(s.backgroundOpacity * 100));
+    if (opacity) opacity.value = String(Math.round(s.spriteOpacity * 100));
+    if (opacityValue) opacityValue.textContent = String(Math.round(s.spriteOpacity * 100));
 
     ensureHolder();
     const holder = document.getElementById('candy-expression-holder');
@@ -1083,9 +1090,9 @@ function applyHolderChrome() {
     holder.classList.toggle('candy-chromeless', !!settings().chromeless);
     holder.classList.toggle('candy-hidden', !settings().showSpriteWindow);
 
-    // Panel transparency. Drives the ::before layer only, so the sprite stays crisp.
-    const alpha = Number(settings().backgroundOpacity);
-    holder.style.setProperty('--candy-bg-alpha', String(Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 1));
+    // Fades the character sprite itself; the frame stays fully visible.
+    const alpha = Number(settings().spriteOpacity);
+    holder.style.setProperty('--candy-sprite-alpha', String(Number.isFinite(alpha) ? Math.min(1, Math.max(0.05, alpha)) : 1));
 }
 
 /** Remember the size after the user drags the resize corner. */
@@ -1109,35 +1116,80 @@ function watchHolderResize(holder) {
     ro.observe(holder);
 }
 
-function makeDraggable(holder, handle) {
-    let startX = 0, startY = 0, originX = 0, originY = 0, dragging = false;
-    const onDown = (e) => {
-        dragging = true;
-        const p = e.touches ? e.touches[0] : e;
-        const rect = holder.getBoundingClientRect();
-        originX = rect.left; originY = rect.top;
-        startX = p.clientX; startY = p.clientY;
-        holder.style.bottom = 'auto';
-        e.preventDefault();
-        document.addEventListener('pointermove', onMove);
-        document.addEventListener('pointerup', onUp);
+/**
+ * Drag the window from anywhere on its frame - not just a small grip.
+ *
+ * Two things have to keep working while the whole frame is a drag handle:
+ *  - the header buttons (pick / pin / settings) must still take clicks;
+ *  - the bottom-right resize corner must still resize;
+ *  - clicking the sprite must still open the expression picker.
+ * The last one is handled with a movement threshold: move the pointer and it's
+ * a drag, release without moving and it's a click.
+ */
+const DRAG_THRESHOLD_PX = 4;
+const RESIZE_CORNER_PX = 20;
+
+function makeDraggable(holder) {
+    let startX = 0, startY = 0, originX = 0, originY = 0;
+    let pending = false, dragging = false, downTarget = null;
+
+    const isInteractive = (el) =>
+        !!(el && typeof el.closest === 'function' && el.closest('.candy-holder-btn, button, select, input, a, textarea'));
+
+    const inResizeCorner = (e) => {
+        const r = holder.getBoundingClientRect();
+        return (r.right - e.clientX) <= RESIZE_CORNER_PX && (r.bottom - e.clientY) <= RESIZE_CORNER_PX;
     };
+
     const onMove = (e) => {
-        if (!dragging) return;
-        const nx = Math.max(0, Math.min(window.innerWidth - 40, originX + (e.clientX - startX)));
-        const ny = Math.max(0, Math.min(window.innerHeight - 40, originY + (e.clientY - startY)));
-        holder.style.left = `${nx}px`;
-        holder.style.top = `${ny}px`;
+        if (!pending) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (!dragging) {
+            if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return; // still might be a click
+            dragging = true;
+            holder.style.bottom = 'auto';
+            holder.classList.add('candy-dragging');
+        }
+        holder.style.left = `${Math.max(0, Math.min(window.innerWidth - 40, originX + dx))}px`;
+        holder.style.top = `${Math.max(0, Math.min(window.innerHeight - 40, originY + dy))}px`;
+        e.preventDefault();
     };
+
     const onUp = () => {
-        dragging = false;
         document.removeEventListener('pointermove', onMove);
         document.removeEventListener('pointerup', onUp);
-        const rect = holder.getBoundingClientRect();
-        settings().holder = { x: Math.round(rect.left), y: Math.round(rect.top) };
-        saveSettings();
+        pending = false;
+        holder.classList.remove('candy-dragging');
+
+        if (dragging) {
+            dragging = false;
+            const rect = holder.getBoundingClientRect();
+            settings().holder = {
+                ...(settings().holder || {}),
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+            };
+            saveSettings();
+        } else if (downTarget && downTarget.id === 'candy-expression-image') {
+            // Pressed and released without moving: treat it as a click.
+            openExpressionPicker();
+        }
+        downTarget = null;
     };
-    handle.addEventListener('pointerdown', onDown);
+
+    holder.addEventListener('pointerdown', (e) => {
+        if (e.button !== undefined && e.button !== 0) return; // left button only
+        if (isInteractive(e.target)) return;                  // let the buttons work
+        if (inResizeCorner(e)) return;                        // let the resize handle work
+
+        const rect = holder.getBoundingClientRect();
+        originX = rect.left; originY = rect.top;
+        startX = e.clientX; startY = e.clientY;
+        pending = true; dragging = false; downTarget = e.target;
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+    });
 }
 
 function pickSpriteFile(sprites, label) {
@@ -1490,16 +1542,14 @@ const SETTINGS_HTML = `
             <label class="checkbox_label" for="candy-emoji-fallback"><input type="checkbox" id="candy-emoji-fallback"><span>Show an emoji when no sprite is found</span></label>
             <label class="checkbox_label" for="candy-remember" title="Stores the chosen label on the message, so reopening a chat or swiping back restores the sprite instantly without another API call."><input type="checkbox" id="candy-remember"><span>Remember each message's expression</span></label>
             <div class="candy-row nowrap">
-                <label class="candy-grow">Window background opacity: <b><span id="candy-opacity-value"></span>%</b><br>
-                    <input id="candy-opacity" type="range" min="0" max="100" step="5" style="width:100%">
+                <label class="candy-grow">Sprite opacity: <b><span id="candy-opacity-value"></span>%</b><br>
+                    <input id="candy-opacity" type="range" min="10" max="100" step="5" style="width:100%">
                 </label>
             </div>
-            <small>The sprite itself stays fully opaque — only the panel behind it fades. Drag the window's bottom-right corner to resize it.</small>
-            <div class="candy-row">
-                <span class="menu_button" id="candy-reset-size"><i class="fa-solid fa-compress"></i> Reset window size</span>
-            </div>
-            <div class="candy-row">
-                <span class="menu_button candy-primary" id="candy-locate" title="Can't see the sprite window? This turns it on, moves it to the bottom-left and flashes it."><i class="fa-solid fa-crosshairs"></i> Find sprite window</span>
+            <small>Fades the character sprite itself. Drag anywhere on the window to move it, or its bottom-right corner to resize.</small>
+            <div class="candy-row candy-buttons">
+                <span class="menu_button candy-primary" id="candy-locate" title="Can't see the sprite window? This turns it on, moves it to the bottom-left and flashes it."><i class="fa-solid fa-crosshairs"></i> Find window</span>
+                <span class="menu_button" id="candy-reset-size" title="Clear a custom window size"><i class="fa-solid fa-compress"></i> Reset size</span>
             </div>
             <div id="candy-status" class="candy-status"></div>
 
@@ -1508,9 +1558,6 @@ const SETTINGS_HTML = `
                 <small>Runs on the main chat API, but with this system prompt only — never the roleplay prompt or chat history. Macros: <tt>{{labels}}</tt>, <tt>{{descriptions}}</tt>, <tt>{{fallback}}</tt>, <tt>{{thinking}}</tt>.</small>
                 <textarea id="candy-prompt" class="text_pole textarea_compact" rows="8" placeholder="Classification system prompt"></textarea>
                 <div id="candy-prompt-warning" class="candy-warning" style="display:none;"></div>
-                <div class="candy-row">
-                    <div class="menu_button" id="candy-prompt-reset"><i class="fa-solid fa-clock-rotate-left"></i> Reset to default</div>
-                </div>
                 <label class="checkbox_label" for="candy-thinking"><input type="checkbox" id="candy-thinking"><span>Make the classifier reason before answering (recommended - more consistent)</span></label>
                 <label class="checkbox_label" for="candy-warn-missing"><input type="checkbox" id="candy-warn-missing"><span>Warn me when a chosen label has no sprite</span></label>
                 <div class="candy-row nowrap">
@@ -1525,9 +1572,10 @@ const SETTINGS_HTML = `
                 <div class="candy-row nowrap">
                     <label class="candy-grow">Fallback label<br><select id="candy-fallback" class="text_pole"></select></label>
                 </div>
-                <div class="candy-row">
-                    <span class="menu_button candy-primary" id="candy-test" title="Classify the last character message right now and show the result"><i class="fa-solid fa-vial"></i> Test classifier</span>
-                    <span class="menu_button" id="candy-view-log" title="See the exact prompt and reply for recent classifications"><i class="fa-solid fa-magnifying-glass"></i> View classification log</span>
+                <div class="candy-row candy-buttons">
+                    <span class="menu_button candy-primary" id="candy-test" title="Classify the last character message right now and show the result"><i class="fa-solid fa-vial"></i> Test</span>
+                    <span class="menu_button" id="candy-view-log" title="See the exact prompt and reply for recent classifications"><i class="fa-solid fa-magnifying-glass"></i> View log</span>
+                    <span class="menu_button" id="candy-prompt-reset" title="Restore the default classifier prompt"><i class="fa-solid fa-clock-rotate-left"></i> Reset prompt</span>
                 </div>
                 <label class="checkbox_label" for="candy-debug"><input type="checkbox" id="candy-debug"><span>Also log every classification to the browser console (F12)</span></label>
             </div>
@@ -1536,7 +1584,7 @@ const SETTINGS_HTML = `
                 <div class="candy-section-title"><span>Sampling</span></div>
                 <small>Used for classification requests only — your roleplay preset is never modified. Lower temperature = more consistent labels. <b>0</b> is fully repeatable; <b>0.2–0.5</b> is a good range to experiment in. Leave a field blank to keep your preset's value.</small>
                 <label class="checkbox_label" for="candy-sampler-enabled"><input type="checkbox" id="candy-sampler-enabled"><span>Use these samplers for classification</span></label>
-                <div class="candy-row">
+                <div class="candy-row candy-buttons">
                     <span>Presets:</span>
                     <span class="menu_button candy-sampler-preset" data-preset="greedy" title="Fully deterministic - identical every time">Greedy</span>
                     <span class="menu_button candy-sampler-preset" data-preset="precise" title="Low randomness, good default for classification">Precise</span>
@@ -1570,8 +1618,8 @@ const SETTINGS_HTML = `
                 <div class="candy-section-title">
                     <span>Expression Library</span>
                     <span>
-                        <span class="menu_button" id="candy-add-label"><i class="fa-solid fa-plus"></i> Add</span>
-                        <span class="menu_button" id="candy-bulk-label"><i class="fa-solid fa-list-ul"></i> Bulk add</span>
+                        <span class="menu_button" id="candy-add-label" title="Add one expression"><i class="fa-solid fa-plus"></i> Add</span>
+                        <span class="menu_button" id="candy-bulk-label" title="Add many at once, one per line"><i class="fa-solid fa-list-ul"></i> Bulk</span>
                     </span>
                 </div>
                 <small>Emotions and actions the classifier can pick from (shared across characters). Each description is injected into the classifier prompt, so the model knows what the label means — essential for actions and for telling similar emotions apart.</small>
@@ -1582,16 +1630,16 @@ const SETTINGS_HTML = `
             <div class="candy-section">
                 <div class="candy-section-title">
                     <span>Variants &amp; Sprites</span>
-                    <span><span class="menu_button" id="candy-add-variant"><i class="fa-solid fa-folder-plus"></i> Add variant(s)</span></span>
+                    <span><span class="menu_button" id="candy-add-variant" title="Create one or more variants (comma-separated)"><i class="fa-solid fa-folder-plus"></i> Add variant</span></span>
                 </div>
                 <div id="candy-char-name" class="candy-hint"></div>
                 <div class="candy-variant-tabs" id="candy-variant-tabs"></div>
-                <div class="candy-row">
-                    <span class="menu_button candy-primary" id="candy-batch-images" title="Select many images at once - each file is filed under the label in its name (anger-0003.png goes to anger)"><i class="fa-solid fa-images"></i> Batch upload images</span>
-                    <span class="menu_button" id="candy-zip-upload" title="Upload a ZIP of images (SillyTavern's own ZIP endpoint - can be flaky; prefer Batch upload images)"><i class="fa-solid fa-file-zipper"></i> ZIP</span>
-                    <span class="menu_button" id="candy-refresh-sprites"><i class="fa-solid fa-rotate"></i> Refresh</span>
-                    <span class="menu_button candy-danger" id="candy-clear-variant" title="Delete every sprite file in this variant"><i class="fa-solid fa-eraser"></i> Delete all sprites</span>
-                    <span class="menu_button candy-danger" id="candy-delete-variant" title="Remove the variant from the list (sprite files are kept)"><i class="fa-solid fa-folder-minus"></i> Remove variant</span>
+                <div class="candy-row candy-buttons">
+                    <span class="menu_button candy-primary" id="candy-batch-images" title="Select many images at once - each file is filed under the label in its name (anger-0003.png goes to anger)"><i class="fa-solid fa-images"></i> Upload images</span>
+                    <span class="menu_button" id="candy-zip-upload" title="Upload a ZIP of images (SillyTavern's own ZIP endpoint - can be flaky; prefer Upload images)"><i class="fa-solid fa-file-zipper"></i> ZIP</span>
+                    <span class="menu_button" id="candy-refresh-sprites" title="Reload sprites from disk"><i class="fa-solid fa-rotate"></i> Refresh</span>
+                    <span class="menu_button candy-danger" id="candy-clear-variant" title="Delete every sprite file in this variant"><i class="fa-solid fa-eraser"></i> Clear sprites</span>
+                    <span class="menu_button candy-danger" id="candy-delete-variant" title="Remove the variant from the list (sprite files are kept)"><i class="fa-solid fa-folder-minus"></i> Remove</span>
                 </div>
                 <div class="candy-sprite-grid" id="candy-sprite-grid"></div>
                 <p class="candy-hint">Sprites live in <tt>/characters/&lt;name&gt;/&lt;variant&gt;/&lt;label&gt;.png</tt>. Batch upload sorts by file name: <tt>anger.png</tt>, <tt>anger-0003.png</tt> and <tt>anger.smug.png</tt> all land under <b>anger</b>. A <tt>*</tt> marks a sprite whose label isn't in your library.</p>
@@ -1682,12 +1730,12 @@ function wireSettingsPanel() {
     const opacity = $id('candy-opacity');
     const opacityValue = $id('candy-opacity-value');
     if (opacity) {
-        const pct = Math.round((s.backgroundOpacity ?? 1) * 100);
+        const pct = Math.round((s.spriteOpacity ?? 1) * 100);
         opacity.value = String(pct);
         if (opacityValue) opacityValue.textContent = String(pct);
         opacity.addEventListener('input', () => {
             const v = Number(opacity.value);
-            settings().backgroundOpacity = v / 100;
+            settings().spriteOpacity = v / 100;
             if (opacityValue) opacityValue.textContent = String(v);
             saveSettings();
             applyHolderChrome();

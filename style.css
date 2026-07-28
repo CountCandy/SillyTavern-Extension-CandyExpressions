@@ -76,32 +76,19 @@
     padding: 5px;
     border-radius: 12px;
     border: 1px solid var(--candy-line);
-    user-select: none;
-    touch-action: none;
-    /* Drag the bottom-right corner to resize. */
-    resize: both;
-    overflow: hidden;
-    isolation: isolate;
-}
-
-/* The panel is a separate layer so its opacity can be lowered without
-   fading the sprite itself. */
-#candy-expression-holder::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    border-radius: 12px;
     background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
     backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10) * 1px));
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    opacity: var(--candy-bg-alpha, 1);
-    pointer-events: none;
+    user-select: none;
+    touch-action: none;
+    /* Drag anywhere on the frame to move; bottom-right corner resizes. */
+    cursor: move;
+    resize: both;
+    overflow: hidden;
 }
 
-#candy-expression-holder > * {
-    position: relative;
-    z-index: 1;
+#candy-expression-holder.candy-dragging {
+    opacity: 0.92;
 }
 
 #candy-expression-holder.candy-hidden {
@@ -109,12 +96,11 @@
 }
 
 #candy-expression-holder.candy-chromeless {
+    background: transparent;
+    backdrop-filter: none;
+    box-shadow: none;
     border-color: transparent;
     padding: 0;
-}
-
-#candy-expression-holder.candy-chromeless::before {
-    display: none;
 }
 
 #candy-expression-holder.candy-chromeless .candy-holder-header {
@@ -173,6 +159,12 @@
     object-fit: contain;
     border-radius: 8px;
     cursor: pointer; /* click to correct the expression */
+    /* Fades the character itself; the frame stays fully visible. */
+    opacity: var(--candy-sprite-alpha, 1);
+}
+
+.candy-emoji-fallback {
+    opacity: var(--candy-sprite-alpha, 1);
 }
 
 #candy-expression-image[src=""],
@@ -244,6 +236,41 @@
     flex-wrap: wrap;
 }
 
+/* Buttons in a section header sit in a row, not stacked. */
+.candy-settings .candy-section > .candy-section-title > span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* ---- One button size everywhere -------------------------------------- *
+ * SillyTavern's .menu_button sizes itself from its text, so multi-word
+ * labels wrapped onto 2-3 lines and every button ended up a different
+ * height. Pin the height, stop the wrapping, and align the icons.
+ * ---------------------------------------------------------------------- */
+.candy-settings .menu_button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    min-height: 30px;
+    padding: 0 12px;
+    margin: 0;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    line-height: 1;
+    font-size: 0.86em;
+    border-radius: 6px;
+}
+
+.candy-settings .menu_button > i {
+    font-size: 0.95em;
+    line-height: 1;
+    margin: 0;
+}
+
 .candy-settings .candy-section > .candy-section-title > span:first-child {
     color: var(--candy-accent);
 }
@@ -254,6 +281,12 @@
     gap: 6px;
     flex-wrap: wrap;
     margin: 6px 0;
+}
+
+/* Rows that are purely buttons: keep them tight on one line where possible. */
+.candy-row.candy-buttons {
+    gap: 6px;
+    row-gap: 6px;
 }
 
 .candy-row.nowrap {
