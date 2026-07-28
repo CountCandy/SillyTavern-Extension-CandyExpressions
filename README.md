@@ -57,13 +57,25 @@ After each character message, the message text is sent to the **main chat API** 
 * It uses **its own system prompt** — never the roleplay system prompt or the chat history. (Under the hood it uses `generateRaw` with a dedicated `systemPrompt`.)
 * The model is asked to answer with exactly one label from your library.
 
-**Actions** are just labels with a description. Give an action a good description and the classifier knows when to pick it:
+**Every label carries a description, and every description is injected into the classifier prompt** — as a `Label guide` block listing each offered label and what it means. Like a lorebook, it's scoped: only labels actually on the menu get described, so nothing irrelevant is sent.
 
 ```
-charging: Winding up or rushing forward to launch a physical attack.
-fighting: Actively trading blows in close combat right now.
-jumping:  Leaping or already airborne after a jump.
+Available labels:
+anger, annoyance, grief, sadness, charging
+
+Label guide (use to disambiguate, especially actions):
+- anger: Hot, active hostility - furious, shouting or lashing out. Stronger than annoyance.
+- annoyance: Mild irritation - exasperated, fed up or grumbling, but not truly furious.
+- charging: Winding up or rushing forward to launch a physical attack.
+- grief: Deep sorrow over a loss, especially of someone. Heavier and more specific than sadness.
+- sadness: Unhappy and low; downcast, sorrowful or crying.
 ```
+
+All 28 built-in emotions ship with definitions written to **contrast the easily-confused pairs** — `annoyance`/`anger`, `grief`/`sadness`, `nervousness`/`fear`, `disappointment`/`sadness`, `remorse`/`grief`. This measurably reduces mis-classification. Your own labels work the same way: write a good description and the model knows when to choose it.
+
+The Expression Library shows **how many labels have a definition**, and marks any that don't — a label with no description is sent to the model as a bare word. With all 31 default labels offered the guide costs roughly 950 tokens; with *Only offer labels that have a sprite* enabled it shrinks to just the labels you can actually display.
+
+> The `{{descriptions}}` macro is what injects the guide. If you edit the prompt and remove it, definitions stop being sent — the settings panel warns you if that happens.
 
 Emotions and actions share one library (used for every character). Which of them are actually *offered* for a given character/variant can be narrowed to just the ones that have a sprite (see **Filter available**).
 

@@ -35,14 +35,43 @@ const METADATA_KEY = 'candyExpressions';  // key in chat_metadata (per-chat, sti
 
 const DEFAULT_VARIANT = 'default';
 
-// The 28 GoEmotions-style labels SillyTavern ships with, as our starting emotion set.
+/*
+ * The 28 GoEmotions-style labels SillyTavern ships with, as our starting set.
+ * Each carries a short definition that is injected into the classifier prompt.
+ * Several of these labels are easy to confuse with each other, so the wording
+ * below deliberately contrasts the near-neighbours (annoyance vs anger,
+ * grief vs sadness, nervousness vs fear, and so on).
+ */
 const DEFAULT_EMOTIONS = [
-    'admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring',
-    'confusion', 'curiosity', 'desire', 'disappointment', 'disapproval',
-    'disgust', 'embarrassment', 'excitement', 'fear', 'gratitude', 'grief',
-    'joy', 'love', 'nervousness', 'optimism', 'pride', 'realization', 'relief',
-    'remorse', 'sadness', 'surprise', 'neutral',
-].map(label => ({ label, description: '' }));
+    { label: 'admiration', description: 'Looking up to someone; impressed by their skill, courage or character.' },
+    { label: 'amusement', description: 'Finding something funny; laughing, smirking or grinning at a joke.' },
+    { label: 'anger', description: 'Hot, active hostility - furious, shouting or lashing out. Stronger than annoyance.' },
+    { label: 'annoyance', description: 'Mild irritation - exasperated, fed up or grumbling, but not truly furious.' },
+    { label: 'approval', description: 'Agreeing or endorsing; nodding along, giving permission or praise.' },
+    { label: 'caring', description: 'Warm concern for someone else\'s wellbeing; comforting, protective or tender.' },
+    { label: 'confusion', description: 'Not understanding; puzzled, lost, or unable to follow what is happening.' },
+    { label: 'curiosity', description: 'Wanting to know more; intrigued, asking questions, investigating.' },
+    { label: 'desire', description: 'Wanting something or someone; longing, craving or physical attraction.' },
+    { label: 'disappointment', description: 'Let down when something hoped for fails; deflated. A reaction to unmet expectation, unlike plain sadness.' },
+    { label: 'disapproval', description: 'Judging something as wrong or unacceptable; objecting or condemning.' },
+    { label: 'disgust', description: 'Revulsion; grossed out, repelled or sickened by something.' },
+    { label: 'embarrassment', description: 'Self-conscious and exposed in front of others; blushing, flustered, mortified.' },
+    { label: 'excitement', description: 'Energised anticipation; eager, buzzing or thrilled about what is coming.' },
+    { label: 'fear', description: 'Afraid of immediate danger; frightened, alarmed, bracing for harm.' },
+    { label: 'gratitude', description: 'Thankful; appreciating what someone has done for them.' },
+    { label: 'grief', description: 'Deep sorrow over a loss, especially of someone. Heavier and more specific than sadness.' },
+    { label: 'joy', description: 'Happy and pleased; delighted, cheerful, beaming.' },
+    { label: 'love', description: 'Deep affection or devotion toward someone; romantic or profoundly close.' },
+    { label: 'nervousness', description: 'Anxious unease about what might happen; jittery or apprehensive, with no immediate danger present, unlike fear.' },
+    { label: 'optimism', description: 'Expecting things to turn out well; hopeful and forward-looking.' },
+    { label: 'pride', description: 'Satisfied with their own achievement or worth; pleased with themselves.' },
+    { label: 'realization', description: 'A sudden dawning understanding; something clicks or they work it out.' },
+    { label: 'relief', description: 'Tension released after a worry passes; unburdened, breathing out.' },
+    { label: 'remorse', description: 'Regret and guilt over something they themselves did wrong.' },
+    { label: 'sadness', description: 'Unhappy and low; downcast, sorrowful or crying.' },
+    { label: 'surprise', description: 'Caught off guard by something unexpected; startled or taken aback.' },
+    { label: 'neutral', description: 'No strong emotion; calm, matter-of-fact or simply going about things.' },
+];
 
 // Example "action" expressions with descriptions, so the pattern is obvious.
 const DEFAULT_ACTIONS = [
@@ -98,7 +127,7 @@ const EMOJI_FALLBACK = {
     surprise: '😲', neutral: '😐',
 };
 
-const SETTINGS_VERSION = 3;
+const SETTINGS_VERSION = 4;
 
 /**
  * Sampler presets for classification. Classification wants consistency, not
@@ -210,6 +239,22 @@ function migrateSettings() {
         if (s.deterministic === false && s.sampler) s.sampler.enabled = false;
         delete s.deterministic;
         s.version = 3;
+    }
+
+    // v3 -> v4: the built-in emotions shipped with empty descriptions, so nothing
+    // was injected for them. Backfill definitions, but never touch a description
+    // the user has written themselves.
+    if ((s.version ?? 3) < 4) {
+        const defaults = new Map(DEFAULT_EMOTIONS.map(e => [e.label, e.description]));
+        let filled = 0;
+        for (const entry of s.emotions) {
+            if (!entry.description?.trim() && defaults.has(entry.label)) {
+                entry.description = defaults.get(entry.label);
+                filled++;
+            }
+        }
+        if (filled) console.log(`[${MODULE_NAME}] Added definitions for ${filled} built-in expression(s).`);
+        s.version = 4;
     }
 
     // Fill in any sampler keys added after the user's settings were written.
@@ -1199,6 +1244,7 @@ const SETTINGS_HTML = `
                 <div class="candy-section-title"><span>Classifier</span></div>
                 <small>Runs on the main chat API, but with this system prompt only — never the roleplay prompt or chat history. Macros: <tt>{{labels}}</tt>, <tt>{{descriptions}}</tt>, <tt>{{fallback}}</tt>, <tt>{{thinking}}</tt>.</small>
                 <textarea id="candy-prompt" class="text_pole textarea_compact" rows="8" placeholder="Classification system prompt"></textarea>
+                <div id="candy-prompt-warning" class="candy-warning" style="display:none;"></div>
                 <div class="candy-row">
                     <div class="menu_button" id="candy-prompt-reset"><i class="fa-solid fa-clock-rotate-left"></i> Reset to default</div>
                 </div>
@@ -1265,7 +1311,8 @@ const SETTINGS_HTML = `
                         <span class="menu_button" id="candy-bulk-label"><i class="fa-solid fa-list-ul"></i> Bulk add</span>
                     </span>
                 </div>
-                <small>Emotions and actions the classifier can pick from (shared across characters). Give actions a description so the model knows when to choose them.</small>
+                <small>Emotions and actions the classifier can pick from (shared across characters). Each description is injected into the classifier prompt, so the model knows what the label means — essential for actions and for telling similar emotions apart.</small>
+                <div id="candy-label-summary" class="candy-hint"></div>
                 <div class="candy-label-list" id="candy-label-list"></div>
             </div>
 
@@ -1325,12 +1372,17 @@ function wireSettingsPanel() {
     const prompt = $id('candy-prompt');
     if (prompt) {
         prompt.value = s.classifyPrompt;
-        prompt.addEventListener('input', () => { settings().classifyPrompt = prompt.value; saveSettings(); });
+        prompt.addEventListener('input', () => {
+            settings().classifyPrompt = prompt.value;
+            saveSettings();
+            updateLabelSummary();
+        });
     }
     $id('candy-prompt-reset')?.addEventListener('click', () => {
         settings().classifyPrompt = DEFAULT_CLASSIFY_PROMPT;
         if (prompt) prompt.value = DEFAULT_CLASSIFY_PROMPT;
         saveSettings();
+        updateLabelSummary();
     });
 
     const bindText = (id, key) => {
@@ -1546,14 +1598,45 @@ function renderLabelList() {
     const container = document.getElementById('candy-label-list');
     if (!container) return;
     const entries = libraryEntries();
-    container.innerHTML = entries.map(e => `
-        <div class="candy-label-item" data-label="${escapeHtml(e.label)}" data-action="${e.isAction}">
+    container.innerHTML = entries.map(e => {
+        const hasDesc = !!e.description.trim();
+        return `
+        <div class="candy-label-item${hasDesc ? '' : ' candy-undescribed'}" data-label="${escapeHtml(e.label)}" data-action="${e.isAction}">
             <span class="candy-label-name ${e.isAction ? 'candy-is-action' : ''}">${escapeHtml(e.label)}</span>
             ${e.isAction ? '<span class="candy-badge">action</span>' : ''}
-            <span class="candy-label-desc" title="${escapeHtml(e.description || '')}">${escapeHtml(e.description || '')}</span>
+            ${hasDesc
+                ? `<span class="candy-label-desc" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</span>`
+                : '<span class="candy-label-desc"><span class="candy-badge candy-badge-muted">no description</span></span>'}
             <span class="candy-mini-btn fa-solid fa-pen candy-edit-label" title="Edit"></span>
             <span class="candy-mini-btn fa-solid fa-xmark candy-danger candy-del-label" title="Remove"></span>
-        </div>`).join('') || '<div class="candy-hint">No labels yet — add some.</div>';
+        </div>`;
+    }).join('') || '<div class="candy-hint">No labels yet — add some.</div>';
+
+    updateLabelSummary();
+}
+
+/** Show how many labels carry a definition, and flag a prompt that drops them. */
+function updateLabelSummary() {
+    const entries = libraryEntries();
+    const described = entries.filter(e => e.description.trim()).length;
+
+    const summary = document.getElementById('candy-label-summary');
+    if (summary) {
+        const missing = entries.length - described;
+        summary.innerHTML = missing === 0
+            ? `All <b>${entries.length}</b> labels have a definition — every one offered to the model is explained.`
+            : `<b>${described}/${entries.length}</b> labels have a definition. <b>${missing}</b> will be sent as a bare word with no explanation.`;
+    }
+
+    // If the prompt no longer contains {{descriptions}}, none of them are injected.
+    const warn = document.getElementById('candy-prompt-warning');
+    if (warn) {
+        const missingMacro = described > 0 && !String(settings().classifyPrompt).includes('{{descriptions}}');
+        warn.style.display = missingMacro ? '' : 'none';
+        if (missingMacro) {
+            warn.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Your prompt has no <tt>{{descriptions}}</tt> macro, so label definitions are <b>not</b> being sent. Add it back, or press Reset to default.';
+        }
+    }
 }
 
 async function onLabelListClick(ev) {
